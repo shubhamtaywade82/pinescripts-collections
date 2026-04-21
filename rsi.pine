@@ -642,19 +642,20 @@ if long_signal or short_signal
 // ════════════════════════════════════════════════════════════
 // ░░  SIGNAL LABELS
 // ════════════════════════════════════════════════════════════
-gate_breakdown_long() =>
-    "4H" + (gate_a_long?"✓":"✗") + " 1H" + (gate_b_long?"✓":"✗") +
-    " 15m" + (gate_c_long?"✓":"✗") + " 5m" + (gate_d_long?"✓":"✗")
+// Global series: UDFs that use values fed by request.security() fail bundled-ref analysis.
+gate_breakdown_long_txt =
+     "4H" + (gate_a_long ? "✓" : "✗") + " 1H" + (gate_b_long ? "✓" : "✗") +
+     " 15m" + (gate_c_long ? "✓" : "✗") + " 5m" + (gate_d_long ? "✓" : "✗")
 
-gate_breakdown_short() =>
-    "4H" + (gate_a_short?"✓":"✗") + " 1H" + (gate_b_short?"✓":"✗") +
-    " 15m" + (gate_c_short?"✓":"✗") + " 5m" + (gate_d_short?"✓":"✗")
+gate_breakdown_short_txt =
+     "4H" + (gate_a_short ? "✓" : "✗") + " 1H" + (gate_b_short ? "✓" : "✗") +
+     " 15m" + (gate_c_short ? "✓" : "✗") + " 5m" + (gate_d_short ? "✓" : "✗")
 
 if show_signals and long_signal
     _col = long_score >= 7 ? color.new(bull_col, 0) :
            long_score >= 5 ? color.new(bull_col, 15) : color.new(bull_col, 30)
     _txt = "▲ LONG" + (show_score ? " [" + str.tostring(long_score) + "/8]" : "") +
-           "\n" + gate_breakdown_long() +
+           "\n" + gate_breakdown_long_txt +
            (long_b1==1?" PD":"") + (long_b2==1?" OB":"") +
            (long_b3==1?" VP/SESS":"") + (long_b4==1?" TL/LIQ":"")
     label.new(bar_index, low - atr14 * 1.2, _txt,
@@ -664,7 +665,7 @@ if show_signals and short_signal
     _col = short_score >= 7 ? color.new(bear_col, 0) :
            short_score >= 5 ? color.new(bear_col, 15) : color.new(bear_col, 30)
     _txt = "▼ SHORT" + (show_score ? " [" + str.tostring(short_score) + "/8]" : "") +
-           "\n" + gate_breakdown_short() +
+           "\n" + gate_breakdown_short_txt +
            (short_b1==1?" PD":"") + (short_b2==1?" OB":"") +
            (short_b3==1?" VP/SESS":"") + (short_b4==1?" TL/LIQ":"")
     label.new(bar_index, high + atr14 * 1.2, _txt,
