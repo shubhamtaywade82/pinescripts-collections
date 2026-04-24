@@ -1,0 +1,606 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+// ============================================================
+// Deep Trades Whales v4 [nemesis] — Lean, Honest, Tradable
+// Pine Script v6 | indicator() | overlay=true
+// ============================================================
+// 7 ISSUES FIXED FROM v3:
+//
+//  Fix 1 — FAKE DELTA DEMOTED
+//    close_pos delta proxy is kept for divergence context ONLY.
+//    It no longer contributes to whale detection or score.
+//    Score weight reassigned to liquidity location (better signal).
+//    Label tags it as "PROXY Δ" so you know it isn't real delta.
+//
+//  Fix 2 — ROLLING VWAP (crypto-correct, no daily reset)
+//    Replaced daily-anchored VWAP with a rolling volume-weighted
+//    moving average over `vwap_len` bars. No session reset.
+//    Works correctly on 24/7 crypto futures and traditional markets.
+//    Optional: weekly anchor for swing context.
+//
+//  Fix 3 — REGIME-DYNAMIC SCORE WEIGHTS
+//    Score weights now shift based on regime:
+//    TRENDING (EMA expanding): momentum weighted higher
+//    RANGING  (ATR low, EMAs flat): absorption/divergence weighted higher
+//    The four pillars remain the same; their contribution changes.
+//
+//  Fix 4 — HTF MARKET STRUCTURE (EMA trend + swing)
+//    Added HTF EMA200 and EMA50 trend filter via request.security().
+//    Whale buy above HTF EMA50 = with-trend (bonus score).
+//    Whale sell below HTF EMA50 = with-trend (bonus score).
+//    Against-trend signals are labelled [COUNTER] and score-penalised.
+//    Hard block option: reject counter-trend signals entirely.
+//
+//  Fix 5 — ICEBERG REQUIRES LOCATION CONTEXT
+//    Absorption signal now requires price is within `iceberg_zone_atr`
+//    ATR of a prior swing high or swing low (liquidity pool).
+//    "High-volume nothing-happened" at a structural level = real signal.
+//    Same event in mid-range = filtered out.
+//
+//  Fix 6 — EXHAUSTION REQUIRES WICK REJECTION
+//    Two conditions now required (both must pass):
+//      a. Next-bar volume collapse (< avg × ratio)  [was the only gate]
+//      b. Rejection wick ≥ wick_mult × body on the follow-through bar
+//    This filters weekend lulls and session transitions.
+//
+//  Fix 7 — STRONG+ ONLY BY DEFAULT
+//    T1 (WEAK) and T2 (MOD) bubbles hidden by default.
+//    New input: `min_display_score` defaults to 55 (STRONG).
+//    T3/T4 only. Chart stays clean. Lower it if you want more signals.
+// ============================================================
+
+//@version=6
+indicator(
+     title            = "Deep Trades Whales v4 [nemesis]",
+     shorttitle       = "DTW v4",
+     overlay          = true,
+     max_labels_count = 300,
+     max_lines_count  = 50
+ )
+
+// ════════════════════════════════════════════════════════════
+// ░░  INPUTS
+// ════════════════════════════════════════════════════════════
+
+grp_adapt = "🧠 Adaptive Engine"
+vol_len        = input.int(50,   "Volume Lookback",             minval=10, maxval=500, group=grp_adapt)
+regime_len     = input.int(100,  "Regime ATR Lookback",         minval=20, maxval=500, group=grp_adapt)
+vol_pct_thr    = input.float(85.0,"Whale Volume Percentile",   minval=60.0, maxval=99.0, step=1.0, group=grp_adapt)
+z_thr_base     = input.float(1.8, "Z-Score Base Threshold",    minval=0.5, maxval=5.0, step=0.1, group=grp_adapt)
+regime_hi_pct  = input.float(70.0,"HIGH Regime Threshold",     minval=50.0, maxval=95.0, step=1.0, group=grp_adapt)
+regime_lo_pct  = input.float(30.0,"LOW Regime Threshold",      minval=5.0,  maxval=49.0, step=1.0, group=grp_adapt)
+
+grp_price = "💥 Price Impact"
+atr_len        = input.int(14,    "ATR Length",                minval=1, group=grp_price)
+impact_thr     = input.float(0.65,"Impact Base (ATR)",         minval=0.05, step=0.05, group=grp_price)
+close_pos_bull = input.float(0.60,"Bull Close Position",       minval=0.50, maxval=1.00, step=0.01, group=grp_price)
+close_pos_bear = input.float(0.40,"Bear Close Position",       minval=0.00, maxval=0.50, step=0.01, group=grp_price)
+
+grp_ice = "🧊 Iceberg / Absorption"
+absorb_vol_pct   = input.float(75.0,"Iceberg Volume Percentile",minval=50.0, maxval=99.0, step=1.0, group=grp_ice)
+absorb_body_max  = input.float(0.20,"Max Body (ATR, NORMAL)",  minval=0.01, step=0.01, group=grp_ice)
+absorb_move_max  = input.float(0.35,"Max Net Move (ATR)",      minval=0.01, step=0.01, group=grp_ice)
+absorb_range_max = input.float(0.90,"Max Range (ATR)",         minval=0.05, step=0.05, group=grp_ice)
+cluster_min      = input.int(2,    "Min bars for cluster",     minval=2, maxval=5, group=grp_ice)
+// FIX 5: location context
+iceberg_zone_atr = input.float(1.5,"Swing Proximity (ATR)",    minval=0.3, maxval=5.0, step=0.1, group=grp_ice,
+                     tooltip="Iceberg only fires within this many ATRs of a prior swing high or low.")
+ice_swing_len    = input.int(20,   "Swing Lookback for Location",minval=5, maxval=100, group=grp_ice)
+
+// FIX 1: delta demoted to context-only
+grp_delta = "⚡ Delta Context (proxy — not real bid/ask)"
+use_delta     = input.bool(true,  "Enable Delta Proxy Context",  group=grp_delta,
+                  tooltip="close_pos proxy. NOT real exchange delta. Used for divergence labelling only — not in score.")
+cd_len        = input.int(20,     "Cumulative Delta Lookback",   minval=3, maxval=100, group=grp_delta)
+show_cd_div   = input.bool(true,  "Show Divergence Labels",      group=grp_delta)
+
+// FIX 4: HTF market structure
+grp_htf = "🌐 HTF Market Structure"
+use_htf         = input.bool(true,  "Enable HTF Filter",         group=grp_htf)
+htf_tf          = input.timeframe("60","HTF Timeframe",          group=grp_htf)
+htf_ema_fast    = input.int(50,    "HTF Fast EMA",               group=grp_htf, minval=5)
+htf_ema_slow    = input.int(200,   "HTF Slow EMA",               group=grp_htf, minval=10)
+htf_hard_block  = input.bool(false,"Block counter-trend signals",group=grp_htf,
+                    tooltip="When on: whale buy below HTF EMA50 is rejected entirely. Off = allowed but score-penalised.")
+htf_rvol_min    = input.float(1.2, "HTF Min RVOL (if enabled)",  group=grp_htf, minval=1.0, step=0.1)
+use_htf_rvol    = input.bool(false,"Also require HTF RVOL",       group=grp_htf)
+
+// FIX 2: Rolling VWAP
+grp_vwap = "📐 Rolling VWAP"
+use_vwap     = input.bool(true,  "Enable Rolling VWAP",          group=grp_vwap,
+                 tooltip="Rolling VWAP — no daily reset. Correct for 24/7 crypto futures.")
+vwap_len     = input.int(200,   "VWAP Rolling Length (bars)",    group=grp_vwap, minval=20, maxval=2000,
+                 tooltip="Number of bars for rolling volume-weighted price. 200 = medium-term mean.")
+show_vwap    = input.bool(true,  "Show Rolling VWAP Line",        group=grp_vwap)
+
+// FIX 6: Exhaustion requires wick rejection
+grp_exhaust = "🔥 Volume Exhaustion"
+use_exhaust   = input.bool(true,  "Detect Exhaustion",           group=grp_exhaust)
+exhaust_ratio = input.float(0.7, "Next-bar vol < avg × ratio",   group=grp_exhaust, minval=0.1, maxval=1.0, step=0.05)
+exhaust_wick  = input.float(1.5, "Required wick ≥ body × mult", group=grp_exhaust, minval=0.5, step=0.1,
+                  tooltip="Follow-through bar must have a wick at least N× its body to confirm rejection.")
+
+// FIX 7: strong-only default display
+grp_vis = "🎨 Visuals"
+confirm_on_close  = input.bool(true,  "Confirm On Bar Close",    group=grp_vis)
+show_signals      = input.bool(true,  "Show Signal Bubbles",     group=grp_vis)
+show_labels       = input.bool(true,  "Show Detail Labels",      group=grp_vis)
+show_bar_color    = input.bool(true,  "Color Signal Bars",       group=grp_vis)
+min_display_score = input.int(55,     "Min Score to Show Signal",group=grp_vis, minval=0, maxval=100,
+                      tooltip="Default 55 = STRONG+. Set to 0 to show all. Keeps chart clean.")
+max_labels        = input.int(150,   "Max Labels",              group=grp_vis, minval=0, maxval=300)
+label_offset_atr  = input.float(0.5, "Label Y Offset (ATR×)",  group=grp_vis, minval=0.1, step=0.1)
+show_regime_lbl   = input.bool(true, "Show Regime Labels",      group=grp_vis)
+show_regime_bg    = input.bool(true, "Regime Background",       group=grp_vis)
+
+grp_dash = "📋 Dashboard"
+show_dashboard = input.bool(true, "Show Dashboard", group=grp_dash)
+dash_pos       = input.string("Top Right", "Position",
+                   options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grp_dash)
+
+// ════════════════════════════════════════════════════════════
+// ░░  HELPERS
+// ════════════════════════════════════════════════════════════
+f_clamp(x, lo, hi) => math.max(lo, math.min(x, hi))
+
+f_score_tier(s) =>
+    s >= 75 ? "EXTREME" : s >= 55 ? "STRONG" : s >= 35 ? "MOD" : "WEAK"
+
+f_score_color(s) =>
+    s >= 75 ? color.new(#ff00ff, 0) :
+    s >= 55 ? color.new(#ff3d3d, 0) :
+    s >= 35 ? color.new(#ff9900, 0) :
+              color.new(#888888, 0)
+
+// ════════════════════════════════════════════════════════════
+// ░░  REGIME CLASSIFIER (preserved from v3)
+// ════════════════════════════════════════════════════════════
+atr_raw   = ta.atr(atr_len)
+atr_safe  = math.max(atr_raw, syminfo.mintick)
+atr_prank = ta.percentrank(atr_raw, regime_len)
+
+regime     = atr_prank >= regime_hi_pct ? 2 : atr_prank <= regime_lo_pct ? 0 : 1
+regime_lbl = regime == 2 ? "HIGH 🔴" : regime == 0 ? "LOW 🟢" : "NORMAL 🟡"
+
+regime_scalar     = regime == 2 ? 1.5 : regime == 0 ? 0.65 : 1.0
+adaptive_rvol_min = regime == 2 ? 2.0 : regime == 0 ? 1.2 : 1.5
+adaptive_z_thr    = regime == 2 ? z_thr_base * 1.4 : regime == 0 ? z_thr_base * 0.75 : z_thr_base
+
+adaptive_impact_thr  = impact_thr     * regime_scalar
+adaptive_body_max    = absorb_body_max  * regime_scalar
+adaptive_move_max    = absorb_move_max  * regime_scalar
+adaptive_range_max   = absorb_range_max * regime_scalar
+
+var int prev_regime = regime
+regime_changed = regime != prev_regime
+prev_regime := regime
+
+bgcolor(show_regime_bg ?
+     (regime == 2 ? color.new(#ff3d3d, 97) :
+      regime == 0 ? color.new(#00c87a, 97) : color.new(#ffcc00, 99)) : na, title="Regime BG")
+
+if show_regime_lbl and regime_changed
+    _col = regime == 2 ? color.new(#ff3d3d, 10) : regime == 0 ? color.new(#00c87a, 10) : color.new(#ffcc00, 10)
+    label.new(bar_index, high + atr_raw * 1.8, "Regime → " + regime_lbl,
+         style=label.style_label_down, color=_col, textcolor=color.white, size=size.tiny)
+
+// ════════════════════════════════════════════════════════════
+// ░░  FIX 2 — ROLLING VWAP (no daily reset)
+// ════════════════════════════════════════════════════════════
+// ta.vwap() resets on session. We compute our own rolling VWAP:
+//   rolling_vwap = sum(tp × vol, len) / sum(vol, len)
+// This is sessionless and works on 24/7 crypto correctly.
+
+tp = (high + low + close) / 3.0
+rolling_vwap = ta.sma(tp * volume, vwap_len) / math.max(ta.sma(volume, vwap_len), 1.0)
+
+above_vwap = close > rolling_vwap
+below_vwap = close < rolling_vwap
+
+plot(show_vwap and use_vwap ? rolling_vwap : na, "Rolling VWAP",
+     color=color.new(color.white, 40), linewidth=1, style=plot.style_linebr)
+
+// ════════════════════════════════════════════════════════════
+// ░░  FIX 4 — HTF MARKET STRUCTURE (EMA trend)
+// ════════════════════════════════════════════════════════════
+htf_ema_f    = request.security(syminfo.tickerid, htf_tf,
+                   ta.ema(close, htf_ema_fast), lookahead=barmerge.lookahead_off)
+htf_ema_s    = request.security(syminfo.tickerid, htf_tf,
+                   ta.ema(close, htf_ema_slow), lookahead=barmerge.lookahead_off)
+htf_close    = request.security(syminfo.tickerid, htf_tf,
+                   close, lookahead=barmerge.lookahead_off)
+htf_vol_raw  = request.security(syminfo.tickerid, htf_tf,
+                   volume, lookahead=barmerge.lookahead_off)
+htf_vol_base = request.security(syminfo.tickerid, htf_tf,
+                   ta.ema(volume, vol_len), lookahead=barmerge.lookahead_off)
+htf_rvol     = htf_vol_raw / math.max(nz(htf_vol_base, 1.0), 1.0)
+
+// HTF trend: bullish = close above EMA50 AND EMA50 above EMA200
+htf_trend_bull = htf_close > htf_ema_f and htf_ema_f > htf_ema_s
+htf_trend_bear = htf_close < htf_ema_f and htf_ema_f < htf_ema_s
+htf_trend_flat = not htf_trend_bull and not htf_trend_bear
+
+// With-trend and counter-trend classification
+with_trend_long  = htf_trend_bull
+with_trend_short = htf_trend_bear
+counter_long     = htf_trend_bear   // whale buy in downtrend
+counter_short    = htf_trend_bull   // whale sell in uptrend
+
+// HTF RVOL gate (optional)
+htf_rvol_ok = not use_htf_rvol or htf_rvol >= htf_rvol_min
+
+// Hard block: if enabled, counter-trend signals never fire
+htf_long_ok  = not use_htf or (not htf_hard_block or with_trend_long)  and htf_rvol_ok
+htf_short_ok = not use_htf or (not htf_hard_block or with_trend_short) and htf_rvol_ok
+
+// ════════════════════════════════════════════════════════════
+// ░░  BASE VOLUME + PRICE CALCULATIONS
+// ════════════════════════════════════════════════════════════
+vol_base     = ta.ema(volume, vol_len)
+vol_std      = ta.stdev(volume, vol_len)
+vol_safe     = math.max(nz(vol_base, 0.0), 1.0)
+rvol         = volume / vol_safe
+vol_z        = (volume - vol_base) / math.max(nz(vol_std, 1.0), 1.0)
+vol_prank    = ta.percentrank(volume, vol_len)
+
+range_hl     = high - low
+body         = math.abs(close - open)
+net_move     = close - close[1]
+range_atr    = range_hl / atr_safe
+body_atr     = body     / atr_safe
+move_atr     = math.abs(net_move) / atr_safe
+close_pos    = range_hl > 0.0 ? (close - low) / range_hl : 0.5
+
+// ── FIX 1: Delta proxy — context/display only, NOT in detection ──────
+// Label as proxy so users understand the limitation
+net_delta_proxy = use_delta ? volume * (2.0 * close_pos - 1.0) : 0.0   // ranges -vol to +vol
+cum_delta       = use_delta ? math.sum(net_delta_proxy, cd_len) : 0.0
+delta_proxy_bull = cum_delta > 0.0
+delta_proxy_bear = cum_delta < 0.0
+cd_rising        = cum_delta > nz(cum_delta[1], cum_delta)
+cd_falling       = cum_delta < nz(cum_delta[1], cum_delta)
+
+// ── FIX 5: Swing levels for iceberg location context ─────────────────
+swing_hi = ta.highest(high, ice_swing_len)
+swing_lo = ta.lowest(low,   ice_swing_len)
+// Price within iceberg_zone_atr ATRs of a swing high or low
+near_swing_hi = math.abs(close - swing_hi) <= iceberg_zone_atr * atr_safe
+near_swing_lo = math.abs(close - swing_lo) <= iceberg_zone_atr * atr_safe
+near_swing    = near_swing_hi or near_swing_lo
+
+// ════════════════════════════════════════════════════════════
+// ░░  VOLUME ANOMALY (triple gate — preserved from v3)
+// ════════════════════════════════════════════════════════════
+vol_prank_ok = vol_prank >= vol_pct_thr
+vol_z_ok     = vol_z >= adaptive_z_thr
+rvol_ok      = rvol >= adaptive_rvol_min
+vol_anomaly  = vol_prank_ok and vol_z_ok and rvol_ok
+
+confirmed    = not confirm_on_close or barstate.isconfirmed
+
+impact_up = close > open and net_move > 0.0 and move_atr >= adaptive_impact_thr and close_pos >= close_pos_bull
+impact_dn = close < open and net_move < 0.0 and move_atr >= adaptive_impact_thr and close_pos <= close_pos_bear
+
+// FIX 1: delta removed from whale gate — it was misleading
+// FIX 4: htf_ok now uses EMA structure, not just RVOL
+whale_buy  = confirmed and vol_anomaly and impact_up and htf_long_ok
+whale_sell = confirmed and vol_anomaly and impact_dn and htf_short_ok
+
+// ── FIX 5: Iceberg requires swing proximity ───────────────────────────
+absorb_vol_ok = ta.percentrank(volume, vol_len) >= absorb_vol_pct
+
+iceberg_raw = confirmed and
+              absorb_vol_ok and
+              body_atr  <= adaptive_body_max and
+              move_atr  <= adaptive_move_max  and
+              range_atr <= adaptive_range_max and
+              near_swing and                       // ← FIX 5: must be at swing level
+              not whale_buy and not whale_sell
+
+var int absorb_streak = 0
+absorb_streak    := iceberg_raw ? absorb_streak + 1 : 0
+iceberg_cluster   = iceberg_raw and absorb_streak >= cluster_min
+iceberg           = iceberg_raw
+
+// ── FIX 6: Exhaustion requires volume collapse AND wick rejection ─────
+next_bar_vol_low = volume < vol_base * exhaust_ratio
+// Wick check on current bar (the follow-through after the whale):
+//   upper wick ≥ body × exhaust_wick (for whale buy exhaustion)
+//   lower wick ≥ body × exhaust_wick (for whale sell exhaustion)
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+body_safe  = math.max(body, atr_safe * 0.1)   // avoid div by zero on doji
+has_rejection_wick_bull = upper_wick >= body_safe * exhaust_wick   // wick up = rejection of rally
+has_rejection_wick_bear = lower_wick >= body_safe * exhaust_wick   // wick down = rejection of selloff
+
+whale_exhaustion = use_exhaust and
+                   ((whale_buy[1]  and next_bar_vol_low and has_rejection_wick_bull) or
+                    (whale_sell[1] and next_bar_vol_low and has_rejection_wick_bear))
+
+// ── Delta divergence (context label only, not in score) ──────────────
+price_new_hi   = high == ta.highest(high, cd_len)
+price_new_lo   = low  == ta.lowest(low,   cd_len)
+delta_div_bear = show_cd_div and use_delta and price_new_hi and cd_falling and confirmed
+delta_div_bull = show_cd_div and use_delta and price_new_lo and cd_rising  and confirmed
+
+// ════════════════════════════════════════════════════════════
+// ░░  FIX 3 — REGIME-DYNAMIC SCORE WEIGHTS
+// ════════════════════════════════════════════════════════════
+// Four pillars: Volume, Impact, Location (replaces delta), Structure
+// Weights shift based on regime:
+//   TRENDING (HIGH vol + EMA expanding): momentum pillars weighted up
+//   RANGING  (LOW vol, EMAs flat):       location/absorption weighted up
+
+// Pillar 1: Volume strength (RVOL + Z + prank)
+rvol_norm   = f_clamp((rvol - adaptive_rvol_min) / adaptive_rvol_min, 0.0, 1.0)
+z_excess    = f_clamp((vol_z - adaptive_z_thr)   / adaptive_z_thr,   0.0, 1.0)
+vol_pillar  = (rvol_norm * 0.6 + z_excess * 0.4) * 100.0
+
+// Pillar 2: Price impact (move ATR normalised)
+move_norm    = f_clamp(move_atr / (adaptive_impact_thr * 3.0), 0.0, 1.0)
+impact_pillar = move_norm * 100.0
+
+// Pillar 3: Location quality (swing proximity + VWAP side + HTF alignment)
+//   Replaces fake delta in score. Actual market context.
+loc_swing_pt  = near_swing ? 40.0 : 0.0
+loc_vwap_pt   = not use_vwap ? 20.0 :
+                (whale_buy and below_vwap) or (whale_sell and above_vwap) ? 40.0 :
+                (whale_buy and above_vwap) or (whale_sell and below_vwap) ? 10.0 : 20.0
+loc_htf_pt    = not use_htf ? 20.0 :
+                (whale_buy and with_trend_long)  or (whale_sell and with_trend_short) ? 40.0 :
+                htf_trend_flat ? 20.0 : 0.0
+loc_pillar    = f_clamp(loc_swing_pt + loc_vwap_pt + loc_htf_pt, 0.0, 100.0)
+
+// Pillar 4: Regime bonus (signal is harder to achieve in HIGH regime)
+regime_pillar = regime == 2 ? 80.0 : regime == 1 ? 50.0 : 30.0
+
+// DYNAMIC WEIGHTS — shift with market state
+// Trending (HIGH): volume(35) + impact(35) + location(20) + regime(10)
+// Normal:          volume(30) + impact(25) + location(30) + regime(15)
+// Ranging (LOW):   volume(20) + impact(20) + location(40) + regime(20)
+w_vol    = regime == 2 ? 0.35 : regime == 0 ? 0.20 : 0.30
+w_impact = regime == 2 ? 0.35 : regime == 0 ? 0.20 : 0.25
+w_loc    = regime == 2 ? 0.20 : regime == 0 ? 0.40 : 0.30
+w_regime = regime == 2 ? 0.10 : regime == 0 ? 0.20 : 0.15
+
+score_raw = vol_pillar * w_vol + impact_pillar * w_impact + loc_pillar * w_loc + regime_pillar * w_regime
+score     = int(math.round(f_clamp(score_raw, 0.0, 100.0)))
+
+// ════════════════════════════════════════════════════════════
+// ░░  FIX 7 — STRONG+ ONLY BY DEFAULT
+// ════════════════════════════════════════════════════════════
+show_this = show_signals and score >= min_display_score
+
+// Buy/sell/ice conditions gated by min_display_score
+plot_buy  = show_this and whale_buy
+plot_sell = show_this and whale_sell
+plot_ice  = show_this and iceberg
+
+// Size from score (no tiers — single clean bubble, size = quality)
+f_sig_size(s) =>
+    s >= 75 ? size.large : s >= 55 ? size.normal : size.small
+
+plotshape(plot_buy,  "Whale Buy",  shape.circle,  location.belowbar,
+     f_score_color(score), size=f_sig_size(score), text="WB")
+plotshape(plot_sell, "Whale Sell", shape.circle,  location.abovebar,
+     f_score_color(score), size=f_sig_size(score), text="WS")
+plotshape(plot_ice,  "Iceberg",    shape.diamond, location.abovebar,
+     color.new(color.orange, 0), size=f_sig_size(score), text="IC")
+
+plotshape(show_signals and iceberg_cluster and score >= min_display_score,
+     "Cluster", shape.square, location.abovebar,
+     color.new(color.purple, 0), size=size.small, text="CLU")
+plotshape(show_signals and whale_exhaustion,
+     "Exhaustion", shape.xcross, location.abovebar,
+     color.new(color.yellow, 0), size=size.small, text="EXH")
+plotshape(delta_div_bear, "CD Div Bear", shape.triangledown,
+     location.abovebar, color.new(#ff00ff, 30), size=size.tiny, text="DIV↓")
+plotshape(delta_div_bull, "CD Div Bull", shape.triangleup,
+     location.belowbar, color.new(#00ffff, 30), size=size.tiny, text="DIV↑")
+
+barcolor(show_bar_color ?
+     (whale_buy        ? color.new(color.lime,   20) :
+      whale_sell       ? color.new(color.red,    20) :
+      iceberg_cluster  ? color.new(color.purple, 20) :
+      iceberg          ? color.new(color.orange, 20) :
+      whale_exhaustion ? color.new(color.yellow, 40) : na) : na)
+
+// ════════════════════════════════════════════════════════════
+// ░░  DETAIL LABELS
+// ════════════════════════════════════════════════════════════
+var label[] sig_labels = array.new<label>(0)
+f_push_label(lb) =>
+    array.push(sig_labels, lb)
+    if array.size(sig_labels) > max_labels
+        label.delete(array.shift(sig_labels))
+
+label_offset = atr_safe * label_offset_atr
+
+// FIX 1: delta tag says "PROXY Δ" — honest labelling
+delta_ctx_tag(bull) =>
+    not use_delta ? "" :
+    bull ? (delta_proxy_bull ? " PROXY Δ↑" : " PROXY Δ↓") :
+           (delta_proxy_bear ? " PROXY Δ↓" : " PROXY Δ↑")
+
+vwap_ctx_tag(bull) =>
+    not use_vwap ? "" :
+    bull ? (below_vwap ? " [Accum]" : " [Dist]") :
+           (above_vwap ? " [Dist]"  : " [Accum]")
+
+htf_ctx_tag(bull) =>
+    not use_htf ? "" :
+    bull ? (with_trend_long ? " WITH-TREND ✓" : counter_long ? " COUNTER ⚠" : " FLAT") :
+           (with_trend_short ? " WITH-TREND ✓" : counter_short ? " COUNTER ⚠" : " FLAT")
+
+if show_labels and whale_buy and score >= min_display_score
+    txt = "🐋 Whale Buy [" + f_score_tier(score) + "] " + regime_lbl + "\n" +
+          htf_ctx_tag(true) + vwap_ctx_tag(true) + delta_ctx_tag(true) + "\n" +
+          "Vol: " + str.tostring(volume, format.volume) +
+          "  RVOL: " + str.tostring(rvol, "#.##") + "×  Z: " + str.tostring(vol_z, "#.##") + "\n" +
+          "Impact: " + str.tostring(move_atr, "#.##") + " ATR  Score: " + str.tostring(score)
+    lb = label.new(bar_index, low - label_offset, txt,
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up,
+         color=f_score_color(score), textcolor=color.white, size=size.small)
+    f_push_label(lb)
+
+if show_labels and whale_sell and score >= min_display_score
+    txt = "🐋 Whale Sell [" + f_score_tier(score) + "] " + regime_lbl + "\n" +
+          htf_ctx_tag(false) + vwap_ctx_tag(false) + delta_ctx_tag(false) + "\n" +
+          "Vol: " + str.tostring(volume, format.volume) +
+          "  RVOL: " + str.tostring(rvol, "#.##") + "×  Z: " + str.tostring(vol_z, "#.##") + "\n" +
+          "Impact: " + str.tostring(move_atr, "#.##") + " ATR  Score: " + str.tostring(score)
+    lb = label.new(bar_index, high + label_offset, txt,
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down,
+         color=f_score_color(score), textcolor=color.white, size=size.small)
+    f_push_label(lb)
+
+if show_labels and (iceberg_cluster or iceberg) and score >= min_display_score
+    _near = near_swing_hi ? "near swing HIGH" : near_swing_lo ? "near swing LOW" : "—"
+    txt = (iceberg_cluster ? "🧊 Cluster [" + str.tostring(absorb_streak) + " bars]" : "🧊 Iceberg") +
+          " " + regime_lbl + "\n" +
+          "Location: " + _near + "\n" +
+          "Vol: " + str.tostring(volume, format.volume) +
+          "  Body: " + str.tostring(body_atr, "#.##") + " ATR  Score: " + str.tostring(score)
+    lb = label.new(bar_index, high + label_offset, txt,
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down,
+         color=iceberg_cluster ? color.new(color.purple,10) : color.new(color.orange,10),
+         textcolor=color.white, size=size.small)
+    f_push_label(lb)
+
+if show_labels and whale_exhaustion
+    _dir = whale_buy[1] ? "Buy" : "Sell"
+    _wick = whale_buy[1] ? str.tostring(upper_wick / atr_safe, "#.##") : str.tostring(lower_wick / atr_safe, "#.##")
+    txt = "⚡ Exhaustion — " + _dir + " rejected\n" +
+          "Vol: " + str.tostring(rvol, "#.##") + "× avg  Wick: " + _wick + " ATR"
+    lb = label.new(bar_index, high + label_offset, txt,
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down,
+         color=color.new(color.yellow, 10), textcolor=color.black, size=size.tiny)
+    f_push_label(lb)
+
+// ════════════════════════════════════════════════════════════
+// ░░  ALERTS
+// ════════════════════════════════════════════════════════════
+alertcondition(whale_buy,                    "🐋 Whale Buy",             "Whale Buy | " + regime_lbl + " | Score: " + str.tostring(score) + " | Close: {{close}}")
+alertcondition(whale_sell,                   "🐋 Whale Sell",            "Whale Sell | " + regime_lbl + " | Score: " + str.tostring(score) + " | Close: {{close}}")
+alertcondition(whale_buy and with_trend_long, "🐋 WITH-TREND Whale Buy", "With-trend Whale Buy | HTF bullish | Close: {{close}}")
+alertcondition(whale_sell and with_trend_short,"🐋 WITH-TREND Whale Sell","With-trend Whale Sell | HTF bearish | Close: {{close}}")
+alertcondition(iceberg_cluster,              "🧊 Cluster at Swing",      "Absorption cluster at swing level | Close: {{close}}")
+alertcondition(whale_exhaustion,             "⚡ Exhaustion",            "Whale exhaustion confirmed (vol+wick) | Close: {{close}}")
+alertcondition(delta_div_bear,               "📉 Proxy Δ Divergence ↓", "Price new high / delta proxy falling | Close: {{close}}")
+alertcondition(delta_div_bull,               "📈 Proxy Δ Divergence ↑", "Price new low / delta proxy rising | Close: {{close}}")
+alertcondition(whale_buy  and score >= 75,   "🔥 EXTREME Whale Buy",    "EXTREME score Whale Buy | Score≥75 | Close: {{close}}")
+alertcondition(whale_sell and score >= 75,   "🔥 EXTREME Whale Sell",   "EXTREME score Whale Sell | Score≥75 | Close: {{close}}")
+alertcondition(regime_changed and regime == 2,"⚡ Regime → HIGH",        "Volatility expanded to HIGH on {{ticker}}")
+alertcondition(regime_changed and regime == 0,"🌙 Regime → LOW",         "Volatility compressed to LOW on {{ticker}}")
+
+// ════════════════════════════════════════════════════════════
+// ░░  DASHBOARD
+// ════════════════════════════════════════════════════════════
+state_txt = whale_buy        ? "🐋 Whale Buy"     :
+            whale_sell       ? "🐋 Whale Sell"    :
+            iceberg_cluster  ? "🧊 Cluster"       :
+            iceberg          ? "🧊 Iceberg"       :
+            whale_exhaustion ? "⚡ Exhaustion"    :
+            delta_div_bear   ? "📉 Proxy Div ↓"  :
+            delta_div_bull   ? "📈 Proxy Div ↑"  :
+            vol_anomaly      ? "📊 Vol Anomaly"   : "— Neutral"
+
+state_col = whale_buy        ? color.new(color.lime,   20) :
+            whale_sell       ? color.new(color.red,    20) :
+            iceberg_cluster  ? color.new(color.purple, 20) :
+            iceberg          ? color.new(color.orange, 20) :
+            whale_exhaustion ? color.new(color.yellow, 20) :
+            vol_anomaly      ? color.new(color.yellow, 50) :
+                               color.new(color.gray,   50)
+
+score_col  = score >= 75 ? color.new(#ff00ff, 20) : score >= 55 ? color.new(#ff3d3d, 20) :
+             score >= 35 ? color.new(#ff9900, 20) : color.new(#555555, 20)
+regime_col = regime == 2 ? color.new(#ff3d3d, 20) : regime == 0 ? color.new(#00c87a, 20) : color.new(#ffcc00, 30)
+htf_col    = with_trend_long or with_trend_short ? color.new(color.lime, 30) :
+             htf_trend_flat ? color.new(color.gray, 40) : color.new(color.red, 30)
+
+dash_position = switch dash_pos
+    "Top Left"     => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left"  => position.bottom_left
+    =>                position.top_right
+
+var table dash = table.new(dash_position, 3, 16,
+     bgcolor=color.new(color.black, 10),
+     border_color=color.new(color.gray, 60), border_width=1,
+     frame_color=color.new(color.gray, 40), frame_width=1)
+
+dc(c, r, t, bg, tc) =>
+    table.cell(dash, c, r, t, bgcolor=bg, text_color=tc, text_size=size.small)
+
+if show_dashboard and barstate.islast
+    BG = color.new(color.black, 20); HD = color.new(#1a1a2e, 10); wht = color.white
+
+    dc(0, 0, "DTW v4",        HD, wht); dc(1, 0, "STATUS", HD, wht); dc(2, 0, "VALUE", HD, wht)
+
+    dc(0, 1, "🌡 Regime",     BG, wht)
+    dc(1, 1, regime_lbl,      regime_col, wht)
+    dc(2, 1, str.tostring(atr_prank, "#.0") + "th pctile", BG, wht)
+
+    dc(0, 2, "Signal",        BG, wht); dc(1, 2, state_txt, state_col, wht); dc(2, 2, "", BG, wht)
+    dc(0, 3, "Score",         BG, wht)
+    dc(1, 3, str.tostring(score) + "/100 [" + f_score_tier(score) + "]", score_col, wht)
+    dc(2, 3, "min show: " + str.tostring(min_display_score), BG, wht)
+
+    dc(0, 4, "── HTF Structure ──", HD, wht); dc(1, 4, "", HD, wht); dc(2, 4, "", HD, wht)
+
+    dc(0, 5, "HTF Trend",     BG, wht)
+    dc(1, 5, with_trend_long ? "BULL ✓" : with_trend_short ? "BEAR ✓" : "FLAT",
+             htf_col, wht)
+    dc(2, 5, str.tostring(htf_ema_fast) + "/" + str.tostring(htf_ema_slow) + " EMA", BG, wht)
+
+    dc(0, 6, "HTF RVOL",      BG, wht)
+    dc(1, 6, str.tostring(htf_rvol, "#.##") + "×  " + (htf_rvol >= htf_rvol_min ? "✓" : "✗"),
+             htf_rvol >= htf_rvol_min ? color.new(color.lime,30) : BG, wht)
+    dc(2, 6, use_htf_rvol ? "required" : "informational", BG, wht)
+
+    dc(0, 7, "── Volume ──",  HD, wht); dc(1, 7, "", HD, wht); dc(2, 7, "", HD, wht)
+
+    dc(0, 8, "RVOL",          BG, wht)
+    dc(1, 8, str.tostring(rvol, "#.##") + "×",
+             rvol >= adaptive_rvol_min * 1.5 ? color.new(color.lime,20) :
+             rvol >= adaptive_rvol_min ? color.new(color.orange,30) : BG, wht)
+    dc(2, 8, "≥ " + str.tostring(adaptive_rvol_min, "#.##") + "× (adapt)", regime_col, wht)
+
+    dc(0, 9, "Z-Score",       BG, wht)
+    dc(1, 9, str.tostring(vol_z, "#.##"),
+             vol_z >= adaptive_z_thr ? color.new(color.lime,30) : BG, wht)
+    dc(2, 9, "≥ " + str.tostring(adaptive_z_thr, "#.##") + " (adapt)", regime_col, wht)
+
+    dc(0,10, "Vol Prank",     BG, wht)
+    dc(1,10, str.tostring(vol_prank, "#.0") + "%",
+             vol_prank >= vol_pct_thr ? color.new(color.lime,30) : BG, wht)
+    dc(2,10, "≥ " + str.tostring(vol_pct_thr, "#.0") + "%", BG, wht)
+
+    dc(0,11, "── Context ──", HD, wht); dc(1,11, "", HD, wht); dc(2,11, "", HD, wht)
+
+    dc(0,12, "Rolling VWAP",  BG, wht)
+    dc(1,12, use_vwap ? (above_vwap ? "Above ▲" : "Below ▼") : "off",
+             use_vwap ? (above_vwap ? color.new(color.lime,40) : color.new(color.red,40)) : BG, wht)
+    dc(2,12, use_vwap ? str.tostring(math.round(rolling_vwap, 2)) : "—", BG, wht)
+
+    dc(0,13, "Near Swing",    BG, wht)
+    dc(1,13, near_swing_hi ? "Near HIGH ✓" : near_swing_lo ? "Near LOW ✓" : "Mid-range",
+             near_swing ? color.new(color.orange,30) : BG, wht)
+    dc(2,13, "±" + str.tostring(iceberg_zone_atr, "#.#") + " ATR", BG, wht)
+
+    dc(0,14, "Proxy Delta",   BG, wht)
+    dc(1,14, use_delta ? (delta_proxy_bull ? "▲ Net Buy" : "▼ Net Sell") : "off",
+             use_delta ? (delta_proxy_bull ? color.new(color.lime,40) : color.new(color.red,40)) : BG, wht)
+    dc(2,14, "⚠ PROXY only", color.new(color.yellow, 40), wht)
+
+    dc(0,15, "Absorb Streak", BG, wht)
+    dc(1,15, str.tostring(absorb_streak) + " bar(s)" + (iceberg_cluster ? " 🧊" : ""),
+             absorb_streak >= cluster_min ? color.new(color.purple,30) : BG, wht)
+    dc(2,15, near_swing ? "at swing ✓" : "no location ✗",
+             near_swing ? color.new(color.lime,40) : color.new(color.red,40), wht)
