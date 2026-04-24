@@ -388,7 +388,6 @@ var table dash = table.new(dash_position, 3, 20,
      bgcolor=color.new(color.black,10), border_color=color.new(color.gray,60), border_width=1,
      frame_color=color.new(color.gray,40), frame_width=1)
 
-
 if show_dashboard and barstate.islast
     BG = color.new(color.black,20)
     HD = color.new(#1a1a2e,10)
