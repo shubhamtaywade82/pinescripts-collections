@@ -355,6 +355,11 @@ if show_labels and whale_exhaustion
 // ════════════════════════════════════════════════════════════
 // ░░  ALERTS
 // ════════════════════════════════════════════════════════════
+// One Create Alert option: fires when any row below would (whale / cluster / exhaustion / proxy div / regime).
+// With-trend & EXTREME are already covered when whale_buy / whale_sell is true.
+any_dtw_alert = whale_buy or whale_sell or iceberg_cluster or whale_exhaustion or delta_div_bear or delta_div_bull or (regime_changed and regime == 2) or (regime_changed and regime == 0)
+alertcondition(any_dtw_alert, "🔔 Any DTW signal", "DTW event | {{ticker}} | {{close}}")
+
 alertcondition(whale_buy,  "🐋 Whale Buy",  "Whale Buy | {{ticker}} | {{close}}")
 alertcondition(whale_sell, "🐋 Whale Sell", "Whale Sell | {{ticker}} | {{close}}")
 alertcondition(whale_buy  and with_trend_long,     "🐋 With-Trend Buy",       "With-trend Whale Buy | HTF bull | {{close}}")
