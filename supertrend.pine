@@ -1,0 +1,8 @@
+//@version=6
+indicator(title="Supertrend", overlay=true)
+
+length = input.int(10, title="Length")
+multiplier = input.float(3.0, title="Multiplier")
+
+trend = ta.supertrend(multiplier, length)
+plot(trend, color=color.blue, title="Supertrend")
