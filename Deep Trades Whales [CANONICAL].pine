@@ -29,6 +29,12 @@
 //  - HTF gate had operator precedence issue → explicit parentheses
 //  - Score pillar 3 (location) referenced whale_buy/sell creating
 //    circular dependency for iceberg score → uses impact_up/dn instead
+//
+// ALERTS (v5):
+//  - Dynamic payloads via alert() (alertcondition() requires const message — CE10123)
+//  - TV: Create Alert → "alert() function calls only"; parse type=…|channel=… in body
+//  - Whale / iceberg / cluster gated by min_display_score; optional gate on div/regime
+//  - Per-channel bar cooldown; syminfo.ticker + close inlined in message
 // ============================================================
 
 //@version=6
@@ -114,6 +120,12 @@ label_offset_atr  = input.float(0.5, "Label Y Offset (ATR×)", group=grp_vis, mi
 grp_dash = "📋 Dashboard"
 show_dashboard = input.bool(true, "Show Dashboard", group=grp_dash)
 dash_pos = input.string("Top Right", "Dashboard corner", group=grp_dash, tooltip="Exact text: Top Right | Top Left | Bottom Right | Bottom Left")
+
+grp_alerts = "🔔 Alerts"
+alert_cooldown_bars = input.int(0, "Cooldown (bars per channel)", minval=0, maxval=500, group=grp_alerts,
+     tooltip="0 = off. After a channel fires, it will not fire again until this many bars have passed. Reduces rapid repeats in the same zone.")
+alert_gate_context = input.bool(true, "Gate context alerts (div / regime) on score", group=grp_alerts,
+     tooltip="When on, proxy divergence and regime-shift alerts only fire if score ≥ Min Score to Display (same as whale/iceberg gate).")
 
 // ════════════════════════════════════════════════════════════
 // ░░  REGIME CLASSIFIER (adaptive v3)
@@ -353,25 +365,157 @@ if show_labels and whale_exhaustion
         label.delete(array.shift(sig_labels))
 
 // ════════════════════════════════════════════════════════════
-// ░░  ALERTS
+// ░░  ALERTS — alert() only (dynamic payload); alertcondition message must be const
 // ════════════════════════════════════════════════════════════
-// One Create Alert option: fires when any row below would (whale / cluster / exhaustion / proxy div / regime).
-// With-trend & EXTREME are already covered when whale_buy / whale_sell is true.
-any_dtw_alert = whale_buy or whale_sell or iceberg_cluster or whale_exhaustion or delta_div_bear or delta_div_bull or (regime_changed and regime == 2) or (regime_changed and regime == 0)
-alertcondition(any_dtw_alert, "🔔 Any DTW signal", "DTW event | {{ticker}} | {{close}}")
+// TradingView: Create Alert → this indicator → "alert() function calls only".
+// Route in your webhook by parsing type=…|key=value (syminfo.ticker + close inlined).
+// Whale / iceberg / cluster respect min_display_score; optional div/regime gate above.
+valid_signal = score >= min_display_score
+ctx_signal_ok = not alert_gate_context or valid_signal
 
-alertcondition(whale_buy,  "🐋 Whale Buy",  "Whale Buy | {{ticker}} | {{close}}")
-alertcondition(whale_sell, "🐋 Whale Sell", "Whale Sell | {{ticker}} | {{close}}")
-alertcondition(whale_buy  and with_trend_long,     "🐋 With-Trend Buy",       "With-trend Whale Buy | HTF bull | {{close}}")
-alertcondition(whale_sell and with_trend_short,    "🐋 With-Trend Sell",      "With-trend Whale Sell | HTF bear | {{close}}")
-alertcondition(whale_buy  and score >= 75,         "🔥 EXTREME Whale Buy",    "EXTREME Buy ≥75 | {{close}}")
-alertcondition(whale_sell and score >= 75,         "🔥 EXTREME Whale Sell",   "EXTREME Sell ≥75 | {{close}}")
-alertcondition(iceberg_cluster,                    "🧊 Absorption Cluster",   "Iceberg cluster at swing | {{close}}")
-alertcondition(whale_exhaustion,                   "⚡ Exhaustion (vol+wick)","Whale exhausted | {{close}}")
-alertcondition(delta_div_bear,                     "📉 Proxy Δ Div Bear",     "New high / proxy delta falling | {{close}}")
-alertcondition(delta_div_bull,                     "📈 Proxy Δ Div Bull",     "New low / proxy delta rising | {{close}}")
-alertcondition(regime_changed and regime == 2,     "⚡ Regime → HIGH",        "Vol regime → HIGH on {{ticker}}")
-alertcondition(regime_changed and regime == 0,     "🌙 Regime → LOW",         "Vol regime → LOW on {{ticker}}")
+_htf_alert = with_trend_long ? "BULL" : with_trend_short ? "BEAR" : "FLAT"
+_regime_code = regime == 2 ? "HIGH" : regime == 0 ? "LOW" : "NORMAL"
+_px = str.tostring(close, format.mintick)
+_sym = syminfo.ticker
+
+alert_msg_whale_buy() =>
+    "🐋 Whale BUY | " + score_tier + " | score=" + str.tostring(score) + "/100 | regime=" + _regime_code +
+     " | HTF=" + _htf_alert + str.replace_all(htf_tag_buy, " ", "") +
+     " | VWAP=" + (not use_vwap ? "off" : str.trim(vwap_tag_buy)) +
+     " | RVOL=" + str.tostring(rvol, "#.##") + " Z=" + str.tostring(vol_z, "#.##") +
+     " | " + _sym + " @ " + _px + " | type=WHALE_BUY|tier=" + score_tier + "|score=" + str.tostring(score) +
+     "|regime=" + _regime_code + "|htf=" + _htf_alert + "|with_htf_long=" + str.tostring(with_trend_long)
+
+alert_msg_whale_sell() =>
+    "🐋 Whale SELL | " + score_tier + " | score=" + str.tostring(score) + "/100 | regime=" + _regime_code +
+     " | HTF=" + _htf_alert + str.replace_all(htf_tag_sell, " ", "") +
+     " | VWAP=" + (not use_vwap ? "off" : str.trim(vwap_tag_sell)) +
+     " | RVOL=" + str.tostring(rvol, "#.##") + " Z=" + str.tostring(vol_z, "#.##") +
+     " | " + _sym + " @ " + _px + " | type=WHALE_SELL|tier=" + score_tier + "|score=" + str.tostring(score) +
+     "|regime=" + _regime_code + "|htf=" + _htf_alert + "|with_htf_short=" + str.tostring(with_trend_short)
+
+_loc_alert = near_swing_hi ? "SWING_HIGH" : near_swing_lo ? "SWING_LOW" : "MID"
+
+alert_msg_iceberg_cluster() =>
+    "🧊 Iceberg CLUSTER | streak=" + str.tostring(absorb_streak) + " | loc=" + _loc_alert +
+     " | score=" + str.tostring(score) + "/100 | regime=" + _regime_code +
+     " | " + _sym + " @ " + _px + " | type=ICEBERG_CLUSTER|streak=" + str.tostring(absorb_streak) +
+     "|loc=" + _loc_alert + "|score=" + str.tostring(score) + "|regime=" + _regime_code
+
+alert_msg_iceberg() =>
+    "🧊 Iceberg | loc=" + _loc_alert + " | score=" + str.tostring(score) + "/100 | regime=" + _regime_code +
+     " | " + _sym + " @ " + _px + " | type=ICEBERG|loc=" + _loc_alert + "|score=" + str.tostring(score) + "|regime=" + _regime_code
+
+alert_msg_exhaust() =>
+    (whale_buy[1] ? "⚡ Exhaustion after Whale BUY | wick vs body ok" : "⚡ Exhaustion after Whale SELL | wick vs body ok") +
+     " | RVOL=" + str.tostring(rvol, "#.##") + " | " + _sym + " @ " + _px + " | type=EXHAUSTION|after=" + (whale_buy[1] ? "BUY" : "SELL")
+
+alert_msg_div_bear() =>
+    "📉 Proxy Δ div BEAR (display-only delta) | score=" + str.tostring(score) + "/100 | " + _sym + " @ " + _px + " | type=PROXY_DIV_BEAR|score=" + str.tostring(score)
+
+alert_msg_div_bull() =>
+    "📈 Proxy Δ div BULL (display-only delta) | score=" + str.tostring(score) + "/100 | " + _sym + " @ " + _px + " | type=PROXY_DIV_BULL|score=" + str.tostring(score)
+
+alert_msg_reg_high() =>
+    "⚡ Regime shift → HIGH vol | ATR%ile=" + str.tostring(atr_prank, "#.0") + " | " + _sym + " @ " + _px + " | type=REGIME_HIGH|atr_prank=" + str.tostring(atr_prank, "#.##")
+
+alert_msg_reg_low() =>
+    "🌙 Regime shift → LOW vol | ATR%ile=" + str.tostring(atr_prank, "#.0") + " | " + _sym + " @ " + _px + " | type=REGIME_LOW|atr_prank=" + str.tostring(atr_prank, "#.##")
+
+_cd_ok(_last) =>
+    alert_cooldown_bars <= 0 or na(_last) or bar_index - _last >= alert_cooldown_bars
+
+var int cd_wb = na
+var int cd_ws = na
+var int cd_wbh = na
+var int cd_wsh = na
+var int cd_eb = na
+var int cd_es = na
+var int cd_ice = na
+var int cd_clu = na
+var int cd_exh = na
+var int cd_db = na
+var int cd_du = na
+var int cd_rh = na
+var int cd_rl = na
+
+wb = whale_buy and valid_signal
+ws = whale_sell and valid_signal
+wb_htf = wb and with_trend_long
+ws_htf = ws and with_trend_short
+eb = whale_buy and valid_signal and score >= 75
+es = whale_sell and valid_signal and score >= 75
+ice_s = iceberg and valid_signal and not iceberg_cluster
+clu = iceberg_cluster and valid_signal
+
+f_wb = wb and _cd_ok(cd_wb)
+if f_wb
+    cd_wb := bar_index
+f_ws = ws and _cd_ok(cd_ws)
+if f_ws
+    cd_ws := bar_index
+f_wbh = wb_htf and _cd_ok(cd_wbh)
+if f_wbh
+    cd_wbh := bar_index
+f_wsh = ws_htf and _cd_ok(cd_wsh)
+if f_wsh
+    cd_wsh := bar_index
+f_eb = eb and _cd_ok(cd_eb)
+if f_eb
+    cd_eb := bar_index
+f_es = es and _cd_ok(cd_es)
+if f_es
+    cd_es := bar_index
+f_ice = ice_s and _cd_ok(cd_ice)
+if f_ice
+    cd_ice := bar_index
+f_clu = clu and _cd_ok(cd_clu)
+if f_clu
+    cd_clu := bar_index
+f_exh = whale_exhaustion and _cd_ok(cd_exh)
+if f_exh
+    cd_exh := bar_index
+f_db = delta_div_bear and ctx_signal_ok and _cd_ok(cd_db)
+if f_db
+    cd_db := bar_index
+f_du = delta_div_bull and ctx_signal_ok and _cd_ok(cd_du)
+if f_du
+    cd_du := bar_index
+f_rh = regime_changed and regime == 2 and ctx_signal_ok and _cd_ok(cd_rh)
+if f_rh
+    cd_rh := bar_index
+f_rl = regime_changed and regime == 0 and ctx_signal_ok and _cd_ok(cd_rl)
+if f_rl
+    cd_rl := bar_index
+
+_alert_freq = confirm_on_close ? alert.freq_once_per_bar_close : alert.freq_once_per_bar
+
+if f_wb
+    alert(alert_msg_whale_buy(), _alert_freq)
+if f_ws
+    alert(alert_msg_whale_sell(), _alert_freq)
+if f_wbh
+    alert(alert_msg_whale_buy() + "|channel=WHALE_BUY_HTF|htf_filter=WITH_LONG", _alert_freq)
+if f_wsh
+    alert(alert_msg_whale_sell() + "|channel=WHALE_SELL_HTF|htf_filter=WITH_SHORT", _alert_freq)
+if f_eb
+    alert(alert_msg_whale_buy() + "|channel=WHALE_BUY_EXTREME|band=EXTREME", _alert_freq)
+if f_es
+    alert(alert_msg_whale_sell() + "|channel=WHALE_SELL_EXTREME|band=EXTREME", _alert_freq)
+if f_ice
+    alert(alert_msg_iceberg(), _alert_freq)
+if f_clu
+    alert(alert_msg_iceberg_cluster(), _alert_freq)
+if f_exh
+    alert(alert_msg_exhaust(), _alert_freq)
+if f_db
+    alert(alert_msg_div_bear(), _alert_freq)
+if f_du
+    alert(alert_msg_div_bull(), _alert_freq)
+if f_rh
+    alert(alert_msg_reg_high(), _alert_freq)
+if f_rl
+    alert(alert_msg_reg_low(), _alert_freq)
 
 // ════════════════════════════════════════════════════════════
 // ░░  DASHBOARD

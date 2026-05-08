@@ -812,6 +812,9 @@ if show_signals and short_signal
 [st_val, st_dir] = ta.supertrend(3.0, 10)
 plot(st_dir < 0 ? st_val : na, "ST Bull", color=color.new(bull_col,50), linewidth=1, style=plot.style_linebr)
 plot(st_dir > 0 ? st_val : na, "ST Bear", color=color.new(bear_col,50), linewidth=1, style=plot.style_linebr)
+// Hidden series for alertcondition() messages (must be const strings; use {{plot("…")}} for scores)
+plot(long_score, "CE Long Score", display=display.none)
+plot(short_score, "CE Short Score", display=display.none)
 
 // Background: show 4H bias (darkest = strongest signal)
 bgcolor(htf_bias ==  1 and h1_bias ==  1 ? color.new(bull_col, 95) :
@@ -831,9 +834,6 @@ var table dash = table.new(position.top_right, 3, 18,
      border_color=color.new(#2a2a2a, 30), border_width=1,
      frame_color=color.new(#3a3a3a, 20), frame_width=1)
 
-dc(c, r, t, bg, tc) =>
-    table.cell(dash, c, r, t, bgcolor=bg, text_color=tc, text_size=size.small)
-
 if show_dash and barstate.islast
     pos = color.new(#00c87a, 20)
     neg = color.new(#ff3d3d, 20)
@@ -842,107 +842,209 @@ if show_dash and barstate.islast
     blk = color.new(#ff0000, 5)   // hard-block color
     wht = color.white
 
-    dc(0, 0, "SMC-CE v5 [4-TF]", hd,  wht)
-    dc(1, 0, "BULL",              hd,  wht)
-    dc(2, 0, "BEAR",              hd,  wht)
+    table.cell(dash, 0, 0, "SMC-CE v5 [4-TF]", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 0, "BULL", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 0, "BEAR", bgcolor=hd, text_color=wht, text_size=size.small)
 
     // ── LAYER A: 4H ──────────────────────────────────────
-    dc(0, 1, "🟥 4H BIAS", hd, wht)
-    dc(1, 1, "", hd, wht)
-    dc(2, 1, "", hd, wht)
+    table.cell(dash, 0, 1, "🟥 4H BIAS", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 1, "", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 1, "", bgcolor=hd, text_color=wht, text_size=size.small)
 
-    dc(0, 2, "  EMA+BOS",   neu, wht)
-    dc(1, 2, htf_bias ==  1 ? "BULL ✓" : htf_bias == 0 ? "NEUTRAL ⚠" : "—",
-             htf_bias ==  1 ? pos : htf_bias == 0 ? color.new(color.yellow,30) : neu, wht)
-    dc(2, 2, htf_bias == -1 ? "BEAR ✓" : htf_bias == 0 ? "NEUTRAL ⚠" : "—",
-             htf_bias == -1 ? neg : htf_bias == 0 ? color.new(color.yellow,30) : neu, wht)
+    table.cell(dash, 0, 2, "  EMA+BOS", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 2, htf_bias ==  1 ? "BULL ✓" : htf_bias == 0 ? "NEUTRAL ⚠" : "—",
+         bgcolor=htf_bias ==  1 ? pos : htf_bias == 0 ? color.new(color.yellow, 30) : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 2, htf_bias == -1 ? "BEAR ✓" : htf_bias == 0 ? "NEUTRAL ⚠" : "—",
+         bgcolor=htf_bias == -1 ? neg : htf_bias == 0 ? color.new(color.yellow, 30) : neu, text_color=wht, text_size=size.small)
 
-    dc(0, 3, "  P/D Zone",  neu, wht)
-    dc(1, 3, htf_in_discount ? "Discount ✓" : "Premium",
-             htf_in_discount ? pos : color.new(color.orange,30), wht)
-    dc(2, 3, htf_in_premium ? "Premium ✓" : "Discount",
-             htf_in_premium ? neg : color.new(color.orange,30), wht)
+    table.cell(dash, 0, 3, "  P/D Zone", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 3, htf_in_discount ? "Discount ✓" : "Premium",
+         bgcolor=htf_in_discount ? pos : color.new(color.orange, 30), text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 3, htf_in_premium ? "Premium ✓" : "Discount",
+         bgcolor=htf_in_premium ? neg : color.new(color.orange, 30), text_color=wht, text_size=size.small)
 
-    dc(0, 4, "  Gate A",    neu, wht)
-    dc(1, 4, gate_a_long  ? "PASS ✓" : "BLOCK ✗", gate_a_long  ? pos : blk, wht)
-    dc(2, 4, gate_a_short ? "PASS ✓" : "BLOCK ✗", gate_a_short ? neg : blk, wht)
+    table.cell(dash, 0, 4, "  Gate A", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 4, gate_a_long  ? "PASS ✓" : "BLOCK ✗", bgcolor=gate_a_long  ? pos : blk, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 4, gate_a_short ? "PASS ✓" : "BLOCK ✗", bgcolor=gate_a_short ? neg : blk, text_color=wht, text_size=size.small)
 
     // ── LAYER B: 1H ──────────────────────────────────────
-    dc(0, 5, "🟧 1H SETUP", hd, wht)
-    dc(1, 5, "", hd, wht)
-    dc(2, 5, "", hd, wht)
+    table.cell(dash, 0, 5, "🟧 1H SETUP", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 5, "", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 5, "", bgcolor=hd, text_color=wht, text_size=size.small)
 
-    dc(0, 6, "  BOS/CHoCH",  neu, wht)
-    dc(1, 6, h1_bias ==  1 ? "BULL ✓" : "—", h1_bias ==  1 ? pos : neu, wht)
-    dc(2, 6, h1_bias == -1 ? "BEAR ✓" : "—", h1_bias == -1 ? neg : neu, wht)
+    table.cell(dash, 0, 6, "  BOS/CHoCH", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 6, h1_bias ==  1 ? "BULL ✓" : "—", bgcolor=h1_bias ==  1 ? pos : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 6, h1_bias == -1 ? "BEAR ✓" : "—", bgcolor=h1_bias == -1 ? neg : neu, text_color=wht, text_size=size.small)
 
-    dc(0, 7, "  EMA Trend",  neu, wht)
-    dc(1, 7, h1_ema_trend ==  1 ? "UP ✓" : "—", h1_ema_trend ==  1 ? pos : neu, wht)
-    dc(2, 7, h1_ema_trend == -1 ? "DOWN ✓" : "—", h1_ema_trend == -1 ? neg : neu, wht)
+    table.cell(dash, 0, 7, "  EMA Trend", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 7, h1_ema_trend ==  1 ? "UP ✓" : "—", bgcolor=h1_ema_trend ==  1 ? pos : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 7, h1_ema_trend == -1 ? "DOWN ✓" : "—", bgcolor=h1_ema_trend == -1 ? neg : neu, text_color=wht, text_size=size.small)
 
-    dc(0, 8, "  Gate B",     neu, wht)
-    dc(1, 8, gate_b_long  ? "PASS ✓" : "BLOCK ✗", gate_b_long  ? pos : blk, wht)
-    dc(2, 8, gate_b_short ? "PASS ✓" : "BLOCK ✗", gate_b_short ? neg : blk, wht)
+    table.cell(dash, 0, 8, "  Gate B", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 8, gate_b_long  ? "PASS ✓" : "BLOCK ✗", bgcolor=gate_b_long  ? pos : blk, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 8, gate_b_short ? "PASS ✓" : "BLOCK ✗", bgcolor=gate_b_short ? neg : blk, text_color=wht, text_size=size.small)
 
     // ── LAYER C: 15m ─────────────────────────────────────
-    dc(0, 9, "🟨 15m ENTRY", hd, wht)
-    dc(1, 9, "", hd, wht)
-    dc(2, 9, "", hd, wht)
+    table.cell(dash, 0, 9, "🟨 15m ENTRY", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 9, "", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 9, "", bgcolor=hd, text_color=wht, text_size=size.small)
 
-    dc(0,10, "  OB Zone",   neu, wht)
-    dc(1,10, m15_ob_bull_ok ? "ACTIVE ✓" : "—", m15_ob_bull_ok ? pos : neu, wht)
-    dc(2,10, m15_ob_bear_ok ? "ACTIVE ✓" : "—", m15_ob_bear_ok ? neg : neu, wht)
+    table.cell(dash, 0, 10, "  OB Zone", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 10, m15_ob_bull_ok ? "ACTIVE ✓" : "—", bgcolor=m15_ob_bull_ok ? pos : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 10, m15_ob_bear_ok ? "ACTIVE ✓" : "—", bgcolor=m15_ob_bear_ok ? neg : neu, text_color=wht, text_size=size.small)
 
-    dc(0,11, "  LIQ Sweep", neu, wht)
-    dc(1,11, m15_sw_bull_ok ? "RECENT ✓" : "—", m15_sw_bull_ok ? pos : neu, wht)
-    dc(2,11, m15_sw_bear_ok ? "RECENT ✓" : "—", m15_sw_bear_ok ? neg : neu, wht)
+    table.cell(dash, 0, 11, "  LIQ Sweep", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 11, m15_sw_bull_ok ? "RECENT ✓" : "—", bgcolor=m15_sw_bull_ok ? pos : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 11, m15_sw_bear_ok ? "RECENT ✓" : "—", bgcolor=m15_sw_bear_ok ? neg : neu, text_color=wht, text_size=size.small)
 
-    dc(0,12, "  Gate C",    neu, wht)
-    dc(1,12, gate_c_long  ? "PASS ✓" : "BLOCK ✗", gate_c_long  ? pos : blk, wht)
-    dc(2,12, gate_c_short ? "PASS ✓" : "BLOCK ✗", gate_c_short ? neg : blk, wht)
+    table.cell(dash, 0, 12, "  Gate C", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 12, gate_c_long  ? "PASS ✓" : "BLOCK ✗", bgcolor=gate_c_long  ? pos : blk, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 12, gate_c_short ? "PASS ✓" : "BLOCK ✗", bgcolor=gate_c_short ? neg : blk, text_color=wht, text_size=size.small)
 
     // ── LAYER D: 5m ──────────────────────────────────────
-    dc(0,13, "🟩 5m TRIGGER", hd, wht)
-    dc(1,13, "", hd, wht)
-    dc(2,13, "", hd, wht)
+    table.cell(dash, 0, 13, "🟩 5m TRIGGER", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 13, "", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 13, "", bgcolor=hd, text_color=wht, text_size=size.small)
 
-    dc(0,14, "  CHoCH",      neu, wht)
-    dc(1,14, choch_bull ? "FIRED ✓" : "—", choch_bull ? pos : neu, wht)
-    dc(2,14, choch_bear ? "FIRED ✓" : "—", choch_bear ? neg : neu, wht)
+    table.cell(dash, 0, 14, "  CHoCH", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 14, choch_bull ? "FIRED ✓" : "—", bgcolor=choch_bull ? pos : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 14, choch_bear ? "FIRED ✓" : "—", bgcolor=choch_bear ? neg : neu, text_color=wht, text_size=size.small)
 
-    dc(0,15, "  Gate D",     neu, wht)
-    dc(1,15, gate_d_long  ? "PASS ✓" : "WAIT", gate_d_long  ? pos : neu, wht)
-    dc(2,15, gate_d_short ? "PASS ✓" : "WAIT", gate_d_short ? neg : neu, wht)
+    table.cell(dash, 0, 15, "  Gate D", bgcolor=neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 15, gate_d_long  ? "PASS ✓" : "WAIT", bgcolor=gate_d_long  ? pos : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 15, gate_d_short ? "PASS ✓" : "WAIT", bgcolor=gate_d_short ? neg : neu, text_color=wht, text_size=size.small)
 
     // ── Final output ──────────────────────────────────────
-    dc(0,16, "⭐ Score",      hd, wht)
-    dc(1,16, str.tostring(long_score)  + "/8",
-             long_score  >= 6 ? pos : long_score  >= 4 ? color.new(color.orange,30) : neu, wht)
-    dc(2,16, str.tostring(short_score) + "/8",
-             short_score >= 6 ? neg : short_score >= 4 ? color.new(color.orange,30) : neu, wht)
+    table.cell(dash, 0, 16, "⭐ Score", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 16, str.tostring(long_score)  + "/8",
+         bgcolor=long_score  >= 6 ? pos : long_score  >= 4 ? color.new(color.orange, 30) : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 16, str.tostring(short_score) + "/8",
+         bgcolor=short_score >= 6 ? neg : short_score >= 4 ? color.new(color.orange, 30) : neu, text_color=wht, text_size=size.small)
 
-    dc(0,17, "🚀 SIGNAL",    hd, wht)
-    dc(1,17, long_signal  ? "▲ LONG"  : all_gates_long  ? "READY" : "BLOCKED",
-             long_signal  ? pos : all_gates_long  ? color.new(bull_col,40) : neu, wht)
-    dc(2,17, short_signal ? "▼ SHORT" : all_gates_short ? "READY" : "BLOCKED",
-             short_signal ? neg : all_gates_short ? color.new(bear_col,40) : neu, wht)
+    table.cell(dash, 0, 17, "🚀 SIGNAL", bgcolor=hd, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 17, long_signal  ? "▲ LONG"  : all_gates_long  ? "READY" : "BLOCKED",
+         bgcolor=long_signal  ? pos : all_gates_long  ? color.new(bull_col, 40) : neu, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 17, short_signal ? "▼ SHORT" : all_gates_short ? "READY" : "BLOCKED",
+         bgcolor=short_signal ? neg : all_gates_short ? color.new(bear_col, 40) : neu, text_color=wht, text_size=size.small)
 
-// // ════════════════════════════════════════════════════════════
-// // ░░  ALERTS
-// // ════════════════════════════════════════════════════════════
-// alertcondition(long_signal,
-//      "▲ LONG [4-TF Aligned]",
-//      "SMC-CE v5 ▲ LONG | 4H+1H+15m+5m aligned | Score: " + str.tostring(long_score) + "/8 | Close: {{close}}")
-// alertcondition(short_signal,
-//      "▼ SHORT [4-TF Aligned]",
-//      "SMC-CE v5 ▼ SHORT | 4H+1H+15m+5m aligned | Score: " + str.tostring(short_score) + "/8 | Close: {{close}}")
-// alertcondition(long_signal  and long_score  >= 7, "🔥 HIGH CONV LONG (7+)",  "SMC-CE v5 🔥 LONG score≥7 | Close: {{close}}")
-// alertcondition(short_signal and short_score >= 7, "🔥 HIGH CONV SHORT (7+)", "SMC-CE v5 🔥 SHORT score≥7 | Close: {{close}}")
-// alertcondition(htf_bias != htf_bias[1] and htf_bias == 1,  "4H → BULLISH", "4H bias shifted BULLISH | Close: {{close}}")
-// alertcondition(htf_bias != htf_bias[1] and htf_bias == -1, "4H → BEARISH", "4H bias shifted BEARISH | Close: {{close}}")
-// alertcondition(h1_choch_bull, "1H CHoCH ↑ — Setup forming", "1H CHoCH bullish — watch for 15m zone | Close: {{close}}")
-// alertcondition(h1_choch_bear, "1H CHoCH ↓ — Setup forming", "1H CHoCH bearish — watch for 15m zone | Close: {{close}}")
-// alertcondition(liq_sweep_bull, "💧 5m Sell-side swept", "5m sell-side liquidity taken | Close: {{close}}")
-// alertcondition(liq_sweep_bear, "💧 5m Buy-side swept",  "5m buy-side liquidity taken | Close: {{close}}")
-// alertcondition(pdh_sweep, "⚠ PDH Swept", "PDH swept — reversal watch | Close: {{close}}")
-// alertcondition(pdl_sweep, "⚠ PDL Swept", "PDL swept — reversal watch | Close: {{close}}")
+// ════════════════════════════════════════════════════════════
+// ░░  UNIFIED ALERTS — alert() system
+//    ONE alert on chart → set "Any alert() function call" → catches everything.
+//    Each event fires with a rich, dynamic message (scores, gates, ticker, price).
+//    alert.freq_once_per_bar prevents duplicate fires within the same candle.
+// ════════════════════════════════════════════════════════════
+
+// ── Helper: gate status string (dynamic — works with alert() but NOT alertcondition) ──
+_long_gates  = "4H:" + (gate_a_long  ? "✓" : "✗") + " 1H:" + (gate_b_long  ? "✓" : "✗") +
+               " 15m:" + (gate_c_long  ? "✓" : "✗") + " 5m:" + (gate_d_long  ? "✓" : "✗")
+_short_gates = "4H:" + (gate_a_short ? "✓" : "✗") + " 1H:" + (gate_b_short ? "✓" : "✗") +
+               " 15m:" + (gate_c_short ? "✓" : "✗") + " 5m:" + (gate_d_short ? "✓" : "✗")
+
+_long_bonus  = (long_b1==1?" PD":"") + (long_b2==1?" OB":"") + (long_b3==1?" VP/SESS":"") + (long_b4==1?" TL/LIQ":"")
+_short_bonus = (short_b1==1?" PD":"") + (short_b2==1?" OB":"") + (short_b3==1?" VP/SESS":"") + (short_b4==1?" TL/LIQ":"")
+
+// ── 🚀 LONG Signal ──
+if long_signal
+    alert("🟢 SMC-CE v5 LONG | Score " + str.tostring(long_score) + "/8 | " + _long_gates +
+          " |" + _long_bonus +
+          " | " + syminfo.ticker + " " + timeframe.period + " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ── 🚀 SHORT Signal ──
+if short_signal
+    alert("🔴 SMC-CE v5 SHORT | Score " + str.tostring(short_score) + "/8 | " + _short_gates +
+          " |" + _short_bonus +
+          " | " + syminfo.ticker + " " + timeframe.period + " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ── ⭐ HIGH CONVICTION (7+) ──
+if long_signal and long_score >= 7
+    alert("⭐ SMC-CE v5 HIGH CONVICTION LONG | Score " + str.tostring(long_score) + "/8 | " +
+          syminfo.ticker + " " + timeframe.period + " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+if short_signal and short_score >= 7
+    alert("⭐ SMC-CE v5 HIGH CONVICTION SHORT | Score " + str.tostring(short_score) + "/8 | " +
+          syminfo.ticker + " " + timeframe.period + " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ── 🔄 4H Bias Change ──
+if ta.change(htf_bias) != 0 and htf_bias == 1
+    alert("🟢 SMC-CE v5 4H BIAS → BULLISH | " + syminfo.ticker + " " + timeframe.period +
+          " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+if ta.change(htf_bias) != 0 and htf_bias == -1
+    alert("🔴 SMC-CE v5 4H BIAS → BEARISH | " + syminfo.ticker + " " + timeframe.period +
+          " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ── 📐 1H CHoCH (Setup Forming) ──
+if h1_choch_bull
+    alert("📐 SMC-CE v5 1H CHoCH UP (setup) — watch 15m zone | " +
+          syminfo.ticker + " " + timeframe.period + " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+if h1_choch_bear
+    alert("📐 SMC-CE v5 1H CHoCH DOWN (setup) — watch 15m zone | " +
+          syminfo.ticker + " " + timeframe.period + " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ── 💧 Liquidity Sweeps (5m chart TF) ──
+if liq_sweep_bull
+    alert("💧 SMC-CE v5 SELL-SIDE LIQ SWEPT | " + syminfo.ticker + " " + timeframe.period +
+          " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+if liq_sweep_bear
+    alert("💧 SMC-CE v5 BUY-SIDE LIQ SWEPT | " + syminfo.ticker + " " + timeframe.period +
+          " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ── 📊 PDH / PDL Sweeps ──
+if pdh_sweep
+    alert("📊 SMC-CE v5 PDH SWEPT | " + syminfo.ticker + " " + timeframe.period +
+          " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+if pdl_sweep
+    alert("📊 SMC-CE v5 PDL SWEPT | " + syminfo.ticker + " " + timeframe.period +
+          " | Close " + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)
+
+// ════════════════════════════════════════════════════════════
+// ░░  LEGACY alertcondition() — for granular per-condition alerts
+//    These still work if you prefer to set up individual alerts.
+//    Scores use {{plot("CE Long Score")}} / {{plot("CE Short Score")}} from hidden plots.
+// ════════════════════════════════════════════════════════════
+alertcondition(long_signal,
+     "SMC-CE LONG [4-TF]",
+     'SMC-CE v5 LONG | 4H+1H+15m+chart CHoCH | Score {{plot("CE Long Score")}}/8 | {{ticker}} {{interval}} | Close {{close}}')
+alertcondition(short_signal,
+     "SMC-CE SHORT [4-TF]",
+     'SMC-CE v5 SHORT | 4H+1H+15m+chart CHoCH | Score {{plot("CE Short Score")}}/8 | {{ticker}} {{interval}} | Close {{close}}')
+alertcondition(long_signal and long_score >= 7,
+     "SMC-CE LONG high conviction (7+)",
+     'SMC-CE v5 LONG score>=7 | Score {{plot("CE Long Score")}}/8 | {{ticker}} {{interval}} | Close {{close}}')
+alertcondition(short_signal and short_score >= 7,
+     "SMC-CE SHORT high conviction (7+)",
+     'SMC-CE v5 SHORT score>=7 | Score {{plot("CE Short Score")}}/8 | {{ticker}} {{interval}} | Close {{close}}')
+alertcondition(ta.change(htf_bias) != 0 and htf_bias == 1,
+     "SMC-CE 4H bias bullish",
+     "SMC-CE v5 4H bias turned BULLISH | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(ta.change(htf_bias) != 0 and htf_bias == -1,
+     "SMC-CE 4H bias bearish",
+     "SMC-CE v5 4H bias turned BEARISH | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(h1_choch_bull,
+     "SMC-CE 1H CHoCH up (setup)",
+     "SMC-CE v5 1H CHoCH bullish — watch 15m zone | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(h1_choch_bear,
+     "SMC-CE 1H CHoCH down (setup)",
+     "SMC-CE v5 1H CHoCH bearish — watch 15m zone | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(liq_sweep_bull,
+     "SMC-CE sell-side liquidity swept",
+     "SMC-CE v5 sell-side sweep (chart TF) | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(liq_sweep_bear,
+     "SMC-CE buy-side liquidity swept",
+     "SMC-CE v5 buy-side sweep (chart TF) | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(pdh_sweep,
+     "SMC-CE PDH swept",
+     "SMC-CE v5 PDH swept | {{ticker}} {{interval}} | Close {{close}}")
+alertcondition(pdl_sweep,
+     "SMC-CE PDL swept",
+     "SMC-CE v5 PDL swept | {{ticker}} {{interval}} | Close {{close}}")
