@@ -147,8 +147,11 @@ if ta.change(fixnan(PL)) != 0
     UpdatedSLPLow := SLPXZL
     UpdatedSLPLow
 
-Long = not(UpdatedSLP * time > 0) and CheckCross(close, UpdatedX, UpdatedY, UpdatedSLP) == 1 and not TradeisON
-Short = not(UpdatedSLPLow * time < 0) and CheckCross(close, UpdatedXLow, UpdatedYLow, UpdatedSLPLow) == -1 and not TradeisON
+int longCrossSignal = close.CheckCross(UpdatedX, UpdatedY, UpdatedSLP)
+int shortCrossSignal = close.CheckCross(UpdatedXLow, UpdatedYLow, UpdatedSLPLow)
+
+Long = not(UpdatedSLP * time > 0) and longCrossSignal == 1 and not TradeisON
+Short = not(UpdatedSLPLow * time < 0) and shortCrossSignal == -1 and not TradeisON
 
 
 TradeFire = Long or Short
