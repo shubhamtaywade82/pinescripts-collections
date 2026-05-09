@@ -64,3 +64,36 @@ Expected style alignment for new scripts:
 - Consistent color system (`#089981` bullish, `#f23645` bearish, neutral muted grays).
 - Drawings/labels that remain readable on dark themes.
 - Stable behavior for history-sensitive functions (compute series globally when needed).
+
+## Default error/warning prevention (required)
+
+When writing Pine code in this repo, proactively prevent common compile/runtime issues before handing scripts to users:
+
+- **Bool-only conditions (CE10101):**
+  - `if`, `switch`, ternary first operand, and logical conditions must be `bool`.
+  - Do not rely on v5-style implicit numeric casting.
+  - Use explicit checks (`x > 0`, `not na(v)`) or `bool(x)` where intended.
+
+- **History-consistency warning (CW10003):**
+  - Do not call history-dependent functions conditionally when possible.
+  - Compute calls globally each bar, then branch on the precomputed series.
+  - Applies to built-ins and user functions using `[]` or history-dependent internals.
+
+- **Historical buffer/runtime offset (RE10143):**
+  - For deep history (`series[n]`) and realtime drawings with past anchors, ensure adequate buffers.
+  - Use `max_bars_back(series, n)` for specific series (`time` often needed for drawing x-coordinates).
+  - Keep buffers as small as required; avoid oversized defaults.
+
+- **Memory limit runtime errors (RE10139):**
+  - Minimize `request.*()` calls and payload size.
+  - Avoid returning large arrays/objects from requests unless required; return computed scalars/tuples instead.
+  - Use `calc_bars_count` and request gating (`barstate.islast` or condition-based) where practical.
+  - Reuse drawings with setters; delete stale drawings; avoid unnecessary historical redraw loops.
+
+- **Type safety with `na` (e.g., CE10097):**
+  - If initializing with `na`, declare explicit type (`float x = na`, `label lb = na`, etc.).
+
+- **Pine v6 hygiene:**
+  - Keep timeframe defaults TradingView-safe (`"60"`, `"240"`, `"D"` etc., avoid `"1H"` where rejected).
+  - Keep `shorttitle` <= 10 chars.
+  - Keep argument style consistent (after named args start, continue with named args).

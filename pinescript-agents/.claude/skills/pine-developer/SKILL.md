@@ -29,6 +29,7 @@ See the "Line Wrapping Rules" section below for complete rules.
 ## Documentation Access
 
 Primary documentation references:
+
 - `/docs/pinescript-v6/quick-reference/syntax-basics.md` - Core syntax and structure
 - `/docs/pinescript-v6/reference-tables/function-index.md` - Complete function reference
 - `/docs/pinescript-v6/core-concepts/execution-model.md` - Understanding Pine Script execution
@@ -47,6 +48,7 @@ Load these docs as needed based on the task at hand.
 ## Core Expertise
 
 ### Pine Script v6 Mastery
+
 - Complete understanding of Pine Script v6 syntax
 - All built-in functions and their proper usage
 - Variable scoping and namespaces
@@ -54,6 +56,7 @@ Load these docs as needed based on the task at hand.
 - Request functions (request.security, request.security_lower_tf)
 
 ### TradingView Environment
+
 - Platform limitations (500 bars, 500 plots, 64 drawings, etc.)
 - Execution model and calculation stages
 - Real-time vs historical bar states
@@ -61,6 +64,7 @@ Load these docs as needed based on the task at hand.
 - Library development standards
 
 ### Code Quality Standards
+
 - Clean, readable code structure
 - Proper error handling for na values
 - Efficient calculations to minimize load time
@@ -76,7 +80,8 @@ Pine Script has STRICT line continuation rules that MUST be followed:
 3. **Function arguments**: Each continuation must be indented
 4. **No explicit continuation character** in Pine Script v6
 
-### SYSTEMATIC CHECK - Review ALL of these:
+### SYSTEMATIC CHECK - Review ALL of these
+
 - [ ] `indicator()` or `strategy()` declarations at the top
 - [ ] All `plot()`, `plotshape()`, `plotchar()` functions
 - [ ] All `if` statements with multiple conditions
@@ -88,6 +93,7 @@ Pine Script has STRICT line continuation rules that MUST be followed:
 - [ ] Any line longer than 80 characters
 
 ### CRITICAL: Ternary Operators MUST Stay on One Line
+
 ```pinescript
 // WRONG - Will cause "end of line without line continuation" error
 text = condition ?
@@ -103,7 +109,8 @@ falseText = str.format("Long false value with {0}", other)
 text = condition ? trueText : falseText
 ```
 
-### CORRECT Line Wrapping:
+### CORRECT Line Wrapping
+
 ```pinescript
 // CORRECT - indented continuation
 longCondition = ta.crossover(ema50, ema200) and
@@ -122,7 +129,8 @@ result = (high - low) / 2 +
      volume / 1000000
 ```
 
-### INCORRECT Line Wrapping (WILL CAUSE ERRORS):
+### INCORRECT Line Wrapping (WILL CAUSE ERRORS)
+
 ```pinescript
 // WRONG - same indentation
 longCondition = ta.crossover(ema50, ema200) and
@@ -196,30 +204,75 @@ if condition
 ## Best Practices
 
 ### Avoid Repainting
+
 - Use barstate.isconfirmed for signals
 - Proper request.security() with lookahead=barmerge.lookahead_off
 - Document any intentional repainting
 
 ### Performance Optimization
+
 - Minimize security() calls
 - Cache repeated calculations
 - Use switch instead of multiple ifs
 - Optimize array operations
 
 ### User Experience
+
 - Logical input grouping with group= parameter
 - Helpful tooltips for complex inputs
 - Sensible default values
 - Clear input labels
 
 ### Error Handling
+
 - Check for na values before operations
 - Handle edge cases (first bars, division by zero)
 - Graceful degradation when data unavailable
 
+## Error & Warning Prevention Defaults (must apply)
+
+Apply these by default while writing Pine v6 code:
+
+1. **CE10101 — Conditions must be bool**
+
+- `if`, `switch`, ternary condition, and logical chains require `bool`.
+- Do not pass numeric/series numeric directly as conditions.
+- Use explicit expressions (`x > 0`, `not na(v)`) or `bool(x)` if numeric casting is truly intended.
+
+1. **CW10003 — Function should be called on each calculation**
+
+- If a function depends on history (`[]`, ta internals, user function with historical refs), compute it in global scope on every bar.
+- Reuse precomputed series inside conditionals/loops instead of calling inside local branches.
+- Also precompute `ta.crossover/ta.crossunder` series before conditional checks when warnings appear.
+
+1. **RE10143 — Historical offset beyond buffer**
+
+- For deep history access or realtime drawings anchored in the past, explicitly size buffers.
+- Prefer `max_bars_back(targetSeries, requiredDepth)` with the smallest valid depth.
+- For past-anchored drawings using `bar_index`, remember Pine internally needs `time[]`; set `max_bars_back(time, depth)` when needed.
+
+1. **RE10139 — Memory limits exceeded**
+
+- Minimize `request.*()` count and return payload.
+- Avoid returning large arrays/objects from requested contexts unless necessary.
+- If only latest state is needed, return IDs only on `barstate.islast`.
+- When possible, do calculations inside the request scope and return scalar results.
+- Use `calc_bars_count` and remove unnecessary drawing/table updates on historical bars.
+
+1. **Type safety with `na`**
+
+- If initializing with `na`, declare type explicitly (`float x = na`, `label l = na`, `box b = na`).
+
+1. **Pine v6 compatibility guardrails**
+
+- Timeframe defaults should use TradingView-safe strings (`"60"`, `"240"`, `"D"`, etc.) when `"1H"`/`"4H"` causes runtime rejection.
+- Keep `shorttitle` <= 10 chars.
+- After using named arguments in a function call, continue using named arguments only.
+
 ## TradingView Constraints
 
 ### Limits to Remember
+
 - Maximum 500 bars historical reference
 - Maximum 500 plot/hline/fill outputs
 - Maximum 64 drawing objects (label/line/box/table)
@@ -229,6 +282,7 @@ if condition
 - Arrays: max 100,000 elements
 
 ### Platform Quirks
+
 - bar_index starts at 0
 - na propagation in calculations
 - Historical vs real-time calculation differences
