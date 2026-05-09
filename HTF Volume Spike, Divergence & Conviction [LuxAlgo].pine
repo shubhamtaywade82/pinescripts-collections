@@ -65,9 +65,12 @@ int    scatterWidthInput = input.int(25,  "Scatter Plot Width",      group = VIS
 int    vpRowsInput       = input.int(40,  "VP Row Density",          group = VIS_GRP, minval = 10)
 int    vpWidthInput      = input.int(12,  "VP Max Width (Bars)",     group = VIS_GRP, minval = 5)
 
+bool   showScatterPanelFill = input.bool(false, "Scatter + VP panel tint (full fill)", group = VIS_GRP,
+     tooltip = "When on, draws the large shaded rectangle behind the HTF scatter and built-in VP. Off by default so candles, external volume profile, and other studies stay readable. Pine cannot force UI tables above other scripts; place table-heavy studies lower in the indicator list so they draw on top.")
+
 color bullColorInput    = input.color(#089981,                    "Bullish Color",         inline = "col", group = VIS_GRP)
 color bearColorInput    = input.color(#f23645,                    "Bearish Color",         inline = "col", group = VIS_GRP)
-color projBgColorInput  = input.color(color.new(#2a2e39, 60),    "Projection Background",              group = VIS_GRP)
+color projBgColorInput  = input.color(color.new(#2a2e39, 88),    "Projection tint (if fill on)",       group = VIS_GRP)
 color convBullColor     = input.color(#00e676,                    "Conviction Bull Color", inline = "cv",  group = VIS_GRP)
 color convBearColor     = input.color(#aa00ff,                    "Conviction Bear Color", inline = "cv",  group = VIS_GRP)
 
@@ -296,7 +299,8 @@ renderBlock(float o, float h, float l, float c, array<float> sP, array<float> sV
     int sStartX = htfRight + 8, int sEndX = sStartX + scatterWidthInput
 
     if hC.size() > 0 and h > l
-        boxArr.push(box.new(sStartX, h, sEndX, l, border_color = na, bgcolor = color.new(projBgColorInput, transp)))
+        if showScatterPanelFill
+            boxArr.push(box.new(sStartX, h, sEndX, l, border_color = na, bgcolor = color.new(projBgColorInput, transp)))
         lineArr.push(line.new(htfRight, h, sStartX, h, color = color.new(chart.fg_color, 85 + transp/2), style = line.style_dotted))
         lineArr.push(line.new(htfRight, l, sStartX, l, color = color.new(chart.fg_color, 85 + transp/2), style = line.style_dotted))
 
