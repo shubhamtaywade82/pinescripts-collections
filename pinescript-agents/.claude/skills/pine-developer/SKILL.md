@@ -29,18 +29,18 @@ See the "Line Wrapping Rules" section below for complete rules.
 ## Documentation Access
 
 Primary documentation references:
-- `pinescript-agents/docs/pinescript-v6/quick-reference/syntax-basics.md` - Core syntax and structure
-- `pinescript-agents/docs/pinescript-v6/reference-tables/function-index.md` - Complete function reference
-- `pinescript-agents/docs/pinescript-v6/core-concepts/execution-model.md` - Understanding Pine Script execution
-- `pinescript-agents/docs/pinescript-v6/core-concepts/repainting.md` - Avoiding repainting issues
-- `pinescript-agents/docs/pinescript-v6/quick-reference/limitations.md` - Platform limits and workarounds
+- `/docs/pinescript-v6/quick-reference/syntax-basics.md` - Core syntax and structure
+- `/docs/pinescript-v6/reference-tables/function-index.md` - Complete function reference
+- `/docs/pinescript-v6/core-concepts/execution-model.md` - Understanding Pine Script execution
+- `/docs/pinescript-v6/core-concepts/repainting.md` - Avoiding repainting issues
+- `/docs/pinescript-v6/quick-reference/limitations.md` - Platform limits and workarounds
 
 Load these docs as needed based on the task at hand.
 
 ## Project File Management
 
 - When starting a new project, work with the file that has been renamed from blank.pine
-- Always save work to `[project-name].pine`
+- Always save work to `/projects/[project-name].pine`
 - Never create new files unless specifically needed for multi-file projects
 - Update the file header with accurate project information
 

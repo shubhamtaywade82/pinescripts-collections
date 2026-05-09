@@ -1,0 +1,290 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82 — Lux-inspired refresh (palette / HUD / cleanup).
+// Converted to Strategy using pinescript-agents skills.
+
+//@version=6
+strategy(
+     title            = 'Trendline Breakouts With Targets [ Lux Strategy ]',
+     shorttitle       = 'TBT Lux Strat',
+     overlay          = true,
+     initial_capital  = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     max_bars_back    = 500,
+     max_lines_count  = 500,
+     max_labels_count = 500
+ )
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Inputs — grouped (pinescript-agents style)
+// ═══════════════════════════════════════════════════════════════════════════
+string G_CORE = 'Core'
+string G_STRAT = 'Strategy Settings'
+string G_STYLE = 'Lux style'
+string G_DISP = 'Display'
+
+int Period =
+     input.int(10, 'Pivot period', minval = 3, maxval = 50, group = G_CORE, tooltip = 'Swing length for pivot high / low.')
+
+bool Trendtype =
+     input.string('Wicks', 'Source', options = ['Wicks', 'Body'], group = G_CORE) == 'Wicks'
+
+string Extensions =
+     input.string('  25', 'Line extension', options = ['  25', '  50', '  75'], group = G_CORE)
+
+// Strategy Specific Inputs
+float rrRatio = 
+     input.float(1.5, 'Risk-to-Reward Ratio', minval = 0.1, step = 0.1, group = G_STRAT, tooltip = 'Multiplier for target relative to the stop loss distance.')
+bool useAtrSl = 
+     input.bool(true, 'Use ATR for Stop Loss', group = G_STRAT)
+int atrLen = 
+     input.int(14, 'ATR Length', minval = 1, group = G_STRAT)
+float atrMult = 
+     input.float(2.0, 'ATR Multiplier', minval = 0.1, step = 0.1, group = G_STRAT)
+
+bool ShowTargets =
+     input.bool(true, 'Show TP / SL visuals', group = G_DISP)
+
+bool ShowDashboard =
+     input.bool(true, 'Show status table', group = G_DISP)
+
+bool LimitTrendlinesToPane =
+     input.bool(false, 'Draw trendlines only in visible range', group = G_DISP,
+         tooltip = 'Fewer objects when scrolling deep history.')
+
+// Lux-inspired defaults
+color LuxBull =
+     input.color(color.new(#26FFD1, 0), 'Bull / long accent', group = G_STYLE)
+color LuxBear =
+     input.color(color.new(#FF4D8D, 0), 'Bear / short accent', group = G_STYLE)
+color LuxMuted =
+     input.color(color.new(#8B9CFF, 82), 'Channel fill', group = G_STYLE)
+color LuxGrid =
+     input.color(color.new(#1A1F35, 70), 'Channel rail (ghost)', group = G_STYLE)
+
+string SignalSize =
+     input.string('Small', 'Signal marker size', options = ['Tiny', 'Small', 'Normal'], group = G_STYLE)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// State & Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+int BarTIME = time - time[1]
+
+var float TP = 0.0
+var float SL = 0.0
+var line tpLine = na
+var line slLine = na // Added for visual SL
+var line slConnector = na
+var label tpLabel = na
+var label slLabel = na // Added for visual SL
+var table dash = na
+
+var int UpdatedX = 0
+var float UpdatedY = 0.0
+var float UpdatedSLP = 0.0
+var int UpdatedXLow = 0
+var float UpdatedYLow = 0.0
+var float UpdatedSLPLow = 0.0
+
+bool inVisiblePane =
+     time > chart.left_visible_bar_time and time < chart.right_visible_bar_time
+
+ExtenSwitcher(string ex) =>
+    switch ex
+        '  25' => 1
+        '  50' => 2
+        => 3
+
+method volAdj(int len) =>
+    math.min(ta.atr(len) * 0.3, close * (0.3 / 100))[20] / 2
+
+float Zband = volAdj(30)
+
+method GetlinePrice(int TIME, float Price, float SLOP, int LookB) =>
+    int EsTime = time - TIME
+    Price + (EsTime - LookB * BarTIME) * SLOP
+
+method CheckCross(float Price, int StartTime, float StartPrice, float SLP) =>
+    int cross = 0
+    if StartPrice[Period] != StartPrice
+        float cur = GetlinePrice(StartTime, StartPrice, SLP, 0)
+        float prev = GetlinePrice(StartTime, StartPrice, SLP, 1)
+        cross :=
+             Price[1] < prev and Price > cur ? 1 : Price[1] > prev - Zband * 0.1 and Price < cur - Zband * 0.1 ? -1 : 0
+    cross
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Trendlines (auto channel + fill)
+// ═══════════════════════════════════════════════════════════════════════════
+method Trendlines(float src, int timeIndex, bool dir) =>
+    var int Start = 1
+    var int End = 0
+    var int TIME = 1
+    var float YEnd = 0.0
+    var float YStart = 0.0
+    var float Slope = 0.0
+    var line Line1 = line.new(na, na, na, na)
+    var line Line2 = line.new(na, na, na, na)
+    var line Line3 = line.new(na, na, na, na)
+
+    float SCR = fixnan(src)
+    if ta.change(SCR) != 0
+        TIME := time[timeIndex]
+        YStart := SCR[1]
+        Start := TIME[1]
+        Slope := (SCR - YStart) / (TIME - Start)
+
+    int EXTime = ExtenSwitcher(Extensions) * BarTIME * 25
+    End := TIME + EXTime
+    YEnd := SCR + EXTime * Slope
+
+    bool allowDraw = not LimitTrendlinesToPane or inVisiblePane
+    if ta.change(SCR) != 0 and strategy.position_size == 0 and allowDraw
+        color lineHue = Slope * time < 0 ? dir ? na : color.new(LuxBull, 45) : dir ? color.new(LuxBear, 45) : na
+        if not na(lineHue)
+            Line1 := line.new(Start, YStart, End, YEnd, xloc = xloc.bar_time, extend = extend.none, color = LuxGrid, width = 1)
+            Line2 := line.new(Start, YStart - Zband * 2, End, YEnd - Zband * 2, xloc = xloc.bar_time, extend = extend.none, color = LuxGrid, width = 1)
+            Line3 := line.new(Start, YStart - Zband, End, YEnd - Zband, xloc = xloc.bar_time, extend = extend.none, color = LuxGrid, width = 1)
+            linefill.new(Line3, Line2, color = LuxMuted)
+            linefill.new(Line3, Line1, color = lineHue)
+
+    [Start, YStart, Slope]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pivots + Geometry
+// ═══════════════════════════════════════════════════════════════════════════
+float phSrc = Trendtype ? high : close > open ? close : open
+float plSrc = Trendtype ? low : close > open ? open : close
+
+float PH = ta.pivothigh(phSrc, Period, Period / 2)
+float PL = ta.pivotlow(plSrc, Period, Period / 2)
+
+[Xx, XZ, SLPXZ] = Trendlines(PH, Period / 2, false)
+[XxL, XZL, SLPXZL] = Trendlines(PL, Period / 2, true)
+
+if ta.change(fixnan(PH)) != 0
+    UpdatedX := Xx
+    UpdatedY := XZ
+    UpdatedSLP := SLPXZ
+
+if ta.change(fixnan(PL)) != 0
+    UpdatedXLow := XxL
+    UpdatedYLow := XZL
+    UpdatedSLPLow := SLPXZL
+
+int longCrossSignal = close.CheckCross(UpdatedX, UpdatedY, UpdatedSLP)
+int shortCrossSignal = close.CheckCross(UpdatedXLow, UpdatedYLow, UpdatedSLPLow)
+
+bool LongCond = not (UpdatedSLP * time > 0) and longCrossSignal == 1 and strategy.position_size == 0
+bool ShortCond = not (UpdatedSLPLow * time < 0) and shortCrossSignal == -1 and strategy.position_size == 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Strategy Execution
+// ═══════════════════════════════════════════════════════════════════════════
+float atrVal = ta.atr(atrLen)
+
+if LongCond
+    float slDist = useAtrSl ? atrVal * atrMult : Zband * 20
+    SL := low - slDist
+    float risk = close - SL
+    TP := close + (risk * rrRatio)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop = SL, limit = TP, comment_loss = "SL", comment_profit = "TP")
+
+if ShortCond
+    float slDist = useAtrSl ? atrVal * atrMult : Zband * 20
+    SL := high + slDist
+    float risk = SL - close
+    TP := close - (risk * rrRatio)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop = SL, limit = TP, comment_loss = "SL", comment_profit = "TP")
+
+// Visual Target Cleanup
+if strategy.position_size == 0
+    if not na(tpLine)
+        line.delete(tpLine)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(slConnector)
+        line.delete(slConnector)
+    if not na(tpLabel)
+        label.delete(tpLabel)
+    if not na(slLabel)
+        label.delete(slLabel)
+
+// Drawing Targets on Entry
+if ta.change(strategy.position_size) != 0 and strategy.position_size != 0 and ShowTargets
+    color bullTint = color.new(LuxBull, 25)
+    color bearTint = color.new(LuxBear, 25)
+    color legCol = strategy.position_size > 0 ? bullTint : bearTint
+    float anchor = strategy.position_size > 0 ? high : low
+
+    slConnector := line.new(bar_index, anchor, bar_index, TP, color = legCol, width = 2, style = line.style_dashed)
+    tpLine := line.new(bar_index, TP, bar_index + 2, TP, color = legCol, width = 2, style = line.style_dashed)
+    slLine := line.new(bar_index, SL, bar_index + 2, SL, color = color.new(LuxBear, 25), width = 2, style = line.style_dashed)
+
+    string tpTxt = 'TP  ' + str.tostring(TP, format.mintick)
+    string slTxt = 'SL  ' + str.tostring(SL, format.mintick)
+    
+    tpLabel := label.new(bar_index + 1, TP, tpTxt, style = label.style_label_left, 
+         color = strategy.position_size > 0 ? color.new(LuxBull, 12) : color.new(LuxBear, 12),
+         textcolor = color.new(#0D0F14, 0), size = size.small)
+         
+    slLabel := label.new(bar_index + 1, SL, slTxt, style = label.style_label_left, 
+         color = color.new(LuxBear, 12),
+         textcolor = color.new(#0D0F14, 0), size = size.small)
+
+// Update visual lines
+if strategy.position_size != 0
+    if not na(tpLine)
+        line.set_x2(tpLine, bar_index)
+    if not na(slLine)
+        line.set_x2(slLine, bar_index)
+    if not na(tpLabel)
+        label.set_x(tpLabel, bar_index + 1)
+    if not na(slLabel)
+        label.set_x(slLabel, bar_index + 1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Signals + Plots
+// ═══════════════════════════════════════════════════════════════════════════
+bool longPlot = LongCond
+bool shortPlot = ShortCond
+
+plotshape(longPlot and SignalSize == 'Tiny', title = 'Long breakout', style = shape.triangleup, location = location.belowbar, size = size.tiny, color = color.new(LuxBull, 0))
+plotshape(longPlot and SignalSize == 'Small', title = 'Long breakout', style = shape.triangleup, location = location.belowbar, size = size.small, color = color.new(LuxBull, 0))
+plotshape(longPlot and SignalSize == 'Normal', title = 'Long breakout', style = shape.triangleup, location = location.belowbar, size = size.normal, color = color.new(LuxBull, 0))
+
+plotshape(shortPlot and SignalSize == 'Tiny', title = 'Short breakout', style = shape.triangledown, location = location.abovebar, size = size.tiny, color = color.new(LuxBear, 0))
+plotshape(shortPlot and SignalSize == 'Small', title = 'Short breakout', style = shape.triangledown, location = location.abovebar, size = size.small, color = color.new(LuxBear, 0))
+plotshape(shortPlot and SignalSize == 'Normal', title = 'Short breakout', style = shape.triangledown, location = location.abovebar, size = size.normal, color = color.new(LuxBear, 0))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mini Dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+if ShowDashboard and barstate.islast
+    if na(dash)
+        dash := table.new(position.top_right, 2, 6, bgcolor = color.new(#121826, 10), border_width = 1, border_color = color.new(LuxBull, 78))
+
+    table.cell(dash, 0, 0, 'TBT Lux Strat', text_color = LuxBull, text_size = size.small)
+    table.cell(dash, 1, 0, '', text_color = LuxBull, text_size = size.small)
+
+    table.cell(dash, 0, 1, 'Position', text_color = color.new(#E8ECFF, 15), text_size = size.small)
+    string posTxt = strategy.position_size > 0 ? 'Long' : strategy.position_size < 0 ? 'Short' : 'Flat'
+    table.cell(dash, 1, 1, posTxt, text_color = color.new(#FFFFFF, 0), text_size = size.small)
+
+    table.cell(dash, 0, 2, 'TP', text_color = color.new(#E8ECFF, 15), text_size = size.small)
+    table.cell(dash, 1, 2, strategy.position_size != 0 ? str.tostring(TP, format.mintick) : '—', text_color = LuxBull, text_size = size.small)
+
+    table.cell(dash, 0, 3, 'SL', text_color = color.new(#E8ECFF, 15), text_size = size.small)
+    table.cell(dash, 1, 3, strategy.position_size != 0 ? str.tostring(SL, format.mintick) : '—', text_color = LuxBear, text_size = size.small)
+
+    float winRate = strategy.wintrades / math.max(1, strategy.closedtrades) * 100
+    table.cell(dash, 0, 4, 'Win Rate', text_color = color.new(#E8ECFF, 15), text_size = size.small)
+    table.cell(dash, 1, 4, str.tostring(winRate, '#.##') + '%', text_color = color.new(#C5CCF0, 0), text_size = size.small)
+
+    float netProfit = (strategy.netprofit / strategy.initial_capital) * 100
+    table.cell(dash, 0, 5, 'Net Profit', text_color = color.new(#E8ECFF, 15), text_size = size.small)
+    table.cell(dash, 1, 5, str.tostring(netProfit, '#.##') + '%', text_color = netProfit >= 0 ? LuxBull : LuxBear, text_size = size.small)
+
+// -- END --

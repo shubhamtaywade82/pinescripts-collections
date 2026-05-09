@@ -1,0 +1,28 @@
+---
+description: Maps TradersPost pinescript-agents paths and capabilities for this monorepo
+alwaysApply: true
+---
+
+# pinescript-agents (TradersPost) in this workspace
+
+The clone at `pinescript-agents/` is the canonical Pine Script assistant bundle: skills (via `.cursor/skills` symlinks), docs, examples, templates, and `projects/`.
+
+## Path resolution for Cursor skills
+
+Pine skills may use paths rooted at the **pinescript-agents** repo (e.g. `/docs/...`, `/projects/...`). In **this** workspace, resolve them under:
+
+- `pinescript-agents/docs/...`
+- `pinescript-agents/projects/...` (including `blank.pine` for new agent-driven projects)
+- `pinescript-agents/examples/...`, `pinescript-agents/templates/...`
+
+Use the **Read** tool with these full relative paths from the workspace root.
+
+## Extra guidance for this repository
+
+- **Collection scripts**: `.pine` files at the **repository root** belong to this collection; when the user is editing one, keep changes in that file unless they ask to move it.
+- **Interactive flow**: from a terminal, run `cd pinescript-agents && ./start` (or `./start.sh`) for the upstream guided workflow; install `pinescript-agents/requirements.txt` if you use video analysis tools.
+- **Assistant instructions**: for global Pine rules (syntax, line continuation, onboarding notes), read `pinescript-agents/CLAUDE.md` when behavior is unclear. Ignore Claude-only “greet first” behavior in Cursor unless the user wants it.
+
+## Maintenance
+
+Update the assistant bundle with `git -C pinescript-agents pull`. `.cursor/skills/*` are symlinks into that clone; do not replace them with stale copies unless you intentionally fork the skills.

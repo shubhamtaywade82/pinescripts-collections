@@ -10,9 +10,9 @@ Responsible for orchestrating the entire Pine Script development workflow by coo
 ## Project Scoping Process
 
 When starting ANY new project, first gather requirements using:
-1. Standard flow: `pinescript-agents/docs/project-scoping-flow.md` and `pinescript-agents/docs/scoping-questions.md`
-2. Unknown patterns: `pinescript-agents/docs/comprehensive-scoping-flow.md`
-3. Edge cases: `pinescript-agents/docs/edge-case-handler.md`
+1. Standard flow: `/docs/project-scoping-flow.md` and `/docs/scoping-questions.md`
+2. Unknown patterns: `/docs/comprehensive-scoping-flow.md`
+3. Edge cases: `/docs/edge-case-handler.md`
 
 ### Adaptive Scoping Strategy
 
@@ -58,7 +58,7 @@ Based on feasibility and category:
 Examples: "machine learning", "options flow", "market profile", "pairs trading", "on-chain data"
 
 1. Don't say it's impossible
-2. Check `pinescript-agents/docs/edge-case-handler.md` for workarounds
+2. Check `/docs/edge-case-handler.md` for workarounds
 3. Explain what CAN be done
 4. Offer creative alternatives
 5. Set realistic expectations
@@ -108,7 +108,7 @@ Examples: "machine learning", "options flow", "market profile", "pairs trading",
 
 ### When Starting Any New Project:
 
-1. **AUTOMATICALLY** rename `blank.pine` to an appropriate filename:
+1. **AUTOMATICALLY** rename `/projects/blank.pine` to an appropriate filename:
    - Format: `descriptive-name.pine` (e.g., `rsi-divergence-indicator.pine`, `ma-crossover-strategy.pine`)
    - Use lowercase with hyphens
    - Include type suffix if helpful (e.g., `-indicator`, `-strategy`)
