@@ -1,0 +1,48 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Ported from pinescript-agents/examples/simple/fair-value-gaps-basic.pine for local testing in pinescripts-collections.
+
+//@version=6
+indicator("Fair Value Gaps Basic [Agent Example]", "FVG · AE", overlay=true, max_boxes_count=100)
+
+show_bullish = input.bool(true, "Show Bullish FVG", group="Display")
+show_bearish = input.bool(true, "Show Bearish FVG", group="Display")
+fvg_color_bull = input.color(color.new(#089981, 82), "Bullish FVG", group="Colors")
+fvg_color_bear = input.color(color.new(#f23645, 82), "Bearish FVG", group="Colors")
+max_boxes = input.int(50, "Max FVG Boxes", minval=1, maxval=100, group="Settings")
+
+var box[] bullish_fvgs = array.new<box>()
+var box[] bearish_fvgs = array.new<box>()
+
+is_bullish_fvg() =>
+    high[2] < low[0] and close[1] > open[1]
+
+is_bearish_fvg() =>
+    low[2] > high[0] and close[1] < open[1]
+
+cleanup_boxes(boxes_array) =>
+    while array.size(boxes_array) > max_boxes
+        old_box = array.shift(boxes_array)
+        box.delete(old_box)
+
+if barstate.isconfirmed
+    if show_bullish and is_bullish_fvg()
+        fvg_top = low[0]
+        fvg_bottom = high[2]
+        fvg_left = bar_index - 1
+        fvg_right = bar_index + 20
+        new_box = box.new(fvg_left, fvg_top, fvg_right, fvg_bottom, bgcolor=fvg_color_bull, border_color=color.new(#089981, 0))
+        array.push(bullish_fvgs, new_box)
+        cleanup_boxes(bullish_fvgs)
+    if show_bearish and is_bearish_fvg()
+        fvg_top = low[2]
+        fvg_bottom = high[0]
+        fvg_left = bar_index - 1
+        fvg_right = bar_index + 20
+        new_box = box.new(fvg_left, fvg_top, fvg_right, fvg_bottom, bgcolor=fvg_color_bear, border_color=color.new(#f23645, 0))
+        array.push(bearish_fvgs, new_box)
+        cleanup_boxes(bearish_fvgs)
+
+bull_fvg_bar = is_bullish_fvg()
+bear_fvg_bar = is_bearish_fvg()
+alertcondition(bull_fvg_bar, "Bullish FVG", "Bullish Fair Value Gap detected")
+alertcondition(bear_fvg_bar, "Bearish FVG", "Bearish Fair Value Gap detected")

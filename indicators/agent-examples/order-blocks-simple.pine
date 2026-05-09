@@ -1,0 +1,235 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Lux-style advanced order block engine for local testing in pinescripts-collections.
+
+//@version=6
+indicator("Order Blocks Advanced [Agent Example]", shorttitle="OBAdvAE", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+//------------------------------------------------------------------------------
+// Constants
+//------------------------------------------------------------------------------
+GREEN = #089981
+RED = #F23645
+MONO_BULLISH = #b2b5be
+MONO_BEARISH = #5d606b
+
+HISTORICAL = "Historical"
+PRESENT = "Present"
+COLORED = "Colored"
+MONOCHROME = "Monochrome"
+ATR = "Atr"
+RANGE = "Cumulative Mean Range"
+CLOSE = "Close"
+HIGHLOW = "High/Low"
+
+SMART_GROUP = "Smart Money Concepts"
+INTERNAL_GROUP = "Internal Order Blocks"
+SWING_GROUP = "Swing Order Blocks"
+FILTER_GROUP = "Order Block Filters"
+VISUAL_GROUP = "Visuals"
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+modeInput = input.string(HISTORICAL, "Mode", options=[HISTORICAL, PRESENT], group=SMART_GROUP)
+styleInput = input.string(COLORED, "Style", options=[COLORED, MONOCHROME], group=SMART_GROUP)
+
+showInternalInput = input.bool(true, "Show Internal OB", group=INTERNAL_GROUP, inline="iob")
+internalLenInput = input.int(3, "", minval=1, maxval=20, group=INTERNAL_GROUP, inline="iob")
+internalMaxInput = input.int(8, "Max Internal OB", minval=1, maxval=40, group=INTERNAL_GROUP)
+internalBullColorInput = input.color(color.new(#3179f5, 80), "Internal Bullish OB", group=INTERNAL_GROUP)
+internalBearColorInput = input.color(color.new(#f77c80, 80), "Internal Bearish OB", group=INTERNAL_GROUP)
+
+showSwingInput = input.bool(true, "Show Swing OB", group=SWING_GROUP, inline="sob")
+swingLenInput = input.int(10, "", minval=2, maxval=100, group=SWING_GROUP, inline="sob")
+swingMaxInput = input.int(8, "Max Swing OB", minval=1, maxval=40, group=SWING_GROUP)
+swingBullColorInput = input.color(color.new(#1848cc, 80), "Swing Bullish OB", group=SWING_GROUP)
+swingBearColorInput = input.color(color.new(#b22833, 80), "Swing Bearish OB", group=SWING_GROUP)
+
+orderBlockFilterInput = input.string(ATR, "Order Block Filter", options=[ATR, RANGE], group=FILTER_GROUP)
+volatilityMultInput = input.float(2.0, "Volatility Reject Mult", minval=1.0, step=0.1, group=FILTER_GROUP)
+orderBlockMitigationInput = input.string(HIGHLOW, "Mitigation Source", options=[CLOSE, HIGHLOW], group=FILTER_GROUP)
+
+extendRightInput = input.bool(true, "Extend Right", group=VISUAL_GROUP)
+fixedExtendBarsInput = input.int(40, "Fixed Extend Bars", minval=5, maxval=500, group=VISUAL_GROUP)
+showLabelsInput = input.bool(true, "Show Block Labels", group=VISUAL_GROUP)
+fillTransparencyInput = input.int(80, "Fill Transparency", minval=0, maxval=100, group=VISUAL_GROUP)
+borderTransparencyInput = input.int(10, "Border Transparency", minval=0, maxval=100, group=VISUAL_GROUP)
+
+//------------------------------------------------------------------------------
+// Storage
+//------------------------------------------------------------------------------
+var box[] internalBullBoxes = array.new<box>()
+var label[] internalBullLabels = array.new<label>()
+var box[] internalBearBoxes = array.new<box>()
+var label[] internalBearLabels = array.new<label>()
+var box[] swingBullBoxes = array.new<box>()
+var label[] swingBullLabels = array.new<label>()
+var box[] swingBearBoxes = array.new<box>()
+var label[] swingBearLabels = array.new<label>()
+
+//------------------------------------------------------------------------------
+// Helper functions
+//------------------------------------------------------------------------------
+clear_boxes_and_labels(boxes, labels) =>
+    while array.size(boxes) > 0
+        box.delete(array.pop(boxes))
+    while array.size(labels) > 0
+        lb = array.pop(labels)
+        if not na(lb)
+            label.delete(lb)
+
+trim_boxes_and_labels(boxes, labels, maxCount) =>
+    while array.size(boxes) > maxCount
+        oldBox = array.shift(boxes)
+        oldLabel = array.shift(labels)
+        box.delete(oldBox)
+        if not na(oldLabel)
+            label.delete(oldLabel)
+
+push_order_block(boxes, labels, leftBar, topPrice, bottomPrice, blockColor, tagText) =>
+    rightBar = bar_index
+    ext = extend.none
+    newBox = box.new(
+         left=leftBar,
+         top=topPrice,
+         right=rightBar,
+         bottom=bottomPrice,
+         xloc=xloc.bar_index,
+         bgcolor=color.new(blockColor, fillTransparencyInput),
+         border_color=color.new(blockColor, borderTransparencyInput),
+         extend=ext
+     )
+    label newLabel = na
+    if showLabelsInput
+        midBar = math.round((leftBar + rightBar) / 2)
+        newLabel := label.new(
+             x=midBar,
+             y=(topPrice + bottomPrice) * 0.5,
+             text=tagText,
+             style=label.style_label_center,
+             color=color.new(blockColor, 0),
+             textcolor=color.white,
+             size=size.tiny
+         )
+    array.push(boxes, newBox)
+    array.push(labels, newLabel)
+
+update_boxes_to_current_bar(boxes, labels) =>
+    idx = 0
+    while idx < array.size(boxes)
+        b = array.get(boxes, idx)
+        box.set_right(b, bar_index)
+        if showLabelsInput
+            lb = array.get(labels, idx)
+            if not na(lb)
+                leftX = box.get_left(b)
+                midX = math.round((leftX + bar_index) / 2)
+                midY = (box.get_top(b) + box.get_bottom(b)) * 0.5
+                label.set_x(lb, midX)
+                label.set_y(lb, midY)
+        idx := idx + 1
+
+delete_mitigated_blocks(boxes, labels, isBull) =>
+    mitigationBull = orderBlockMitigationInput == CLOSE ? close : low
+    mitigationBear = orderBlockMitigationInput == CLOSE ? close : high
+    idx = array.size(boxes) - 1
+    while idx >= 0
+        block = array.get(boxes, idx)
+        blockTop = box.get_top(block)
+        blockBottom = box.get_bottom(block)
+        mitigated = isBull ? mitigationBull < blockBottom : mitigationBear > blockTop
+        if mitigated
+            box.delete(block)
+            lb = array.get(labels, idx)
+            if not na(lb)
+                label.delete(lb)
+            array.remove(boxes, idx)
+            array.remove(labels, idx)
+        idx := idx - 1
+
+//------------------------------------------------------------------------------
+// Colors and filter
+//------------------------------------------------------------------------------
+internalBullColor = styleInput == MONOCHROME ? color.new(MONO_BULLISH, 80) : internalBullColorInput
+internalBearColor = styleInput == MONOCHROME ? color.new(MONO_BEARISH, 80) : internalBearColorInput
+swingBullColor = styleInput == MONOCHROME ? color.new(MONO_BULLISH, 80) : swingBullColorInput
+swingBearColor = styleInput == MONOCHROME ? color.new(MONO_BEARISH, 80) : swingBearColorInput
+
+atrMeasure = ta.atr(200)
+rangeMeasure = ta.cum(ta.tr) / math.max(bar_index, 1)
+volatilityMeasure = orderBlockFilterInput == ATR ? atrMeasure : rangeMeasure
+
+//------------------------------------------------------------------------------
+// Detection engines
+//------------------------------------------------------------------------------
+internalPivotHigh = ta.pivothigh(high, internalLenInput, internalLenInput)
+internalPivotLow = ta.pivotlow(low, internalLenInput, internalLenInput)
+swingPivotHigh = ta.pivothigh(high, swingLenInput, swingLenInput)
+swingPivotLow = ta.pivotlow(low, swingLenInput, swingLenInput)
+
+internalBullTrigger = not na(internalPivotLow) and close > high[internalLenInput]
+internalBearTrigger = not na(internalPivotHigh) and close < low[internalLenInput]
+swingBullTrigger = not na(swingPivotLow) and close > high[swingLenInput]
+swingBearTrigger = not na(swingPivotHigh) and close < low[swingLenInput]
+
+if barstate.isconfirmed
+    if modeInput == PRESENT
+        if internalBullTrigger or internalBearTrigger
+            clear_boxes_and_labels(internalBullBoxes, internalBullLabels)
+            clear_boxes_and_labels(internalBearBoxes, internalBearLabels)
+        if swingBullTrigger or swingBearTrigger
+            clear_boxes_and_labels(swingBullBoxes, swingBullLabels)
+            clear_boxes_and_labels(swingBearBoxes, swingBearLabels)
+
+    if showInternalInput and internalBullTrigger
+        cRange = high[internalLenInput] - low[internalLenInput]
+        volatile = cRange >= volatilityMultInput * volatilityMeasure
+        if not volatile
+            obTop = math.max(open[internalLenInput], close[internalLenInput])
+            obBottom = low[internalLenInput]
+            push_order_block(internalBullBoxes, internalBullLabels, bar_index - internalLenInput, obTop, obBottom, internalBullColor, "iOB+")
+            trim_boxes_and_labels(internalBullBoxes, internalBullLabels, internalMaxInput)
+
+    if showInternalInput and internalBearTrigger
+        cRange = high[internalLenInput] - low[internalLenInput]
+        volatile = cRange >= volatilityMultInput * volatilityMeasure
+        if not volatile
+            obTop = high[internalLenInput]
+            obBottom = math.min(open[internalLenInput], close[internalLenInput])
+            push_order_block(internalBearBoxes, internalBearLabels, bar_index - internalLenInput, obTop, obBottom, internalBearColor, "iOB-")
+            trim_boxes_and_labels(internalBearBoxes, internalBearLabels, internalMaxInput)
+
+    if showSwingInput and swingBullTrigger
+        cRange = high[swingLenInput] - low[swingLenInput]
+        volatile = cRange >= volatilityMultInput * volatilityMeasure
+        if not volatile
+            obTop = math.max(open[swingLenInput], close[swingLenInput])
+            obBottom = low[swingLenInput]
+            push_order_block(swingBullBoxes, swingBullLabels, bar_index - swingLenInput, obTop, obBottom, swingBullColor, "sOB+")
+            trim_boxes_and_labels(swingBullBoxes, swingBullLabels, swingMaxInput)
+
+    if showSwingInput and swingBearTrigger
+        cRange = high[swingLenInput] - low[swingLenInput]
+        volatile = cRange >= volatilityMultInput * volatilityMeasure
+        if not volatile
+            obTop = high[swingLenInput]
+            obBottom = math.min(open[swingLenInput], close[swingLenInput])
+            push_order_block(swingBearBoxes, swingBearLabels, bar_index - swingLenInput, obTop, obBottom, swingBearColor, "sOB-")
+            trim_boxes_and_labels(swingBearBoxes, swingBearLabels, swingMaxInput)
+
+delete_mitigated_blocks(internalBullBoxes, internalBullLabels, true)
+delete_mitigated_blocks(internalBearBoxes, internalBearLabels, false)
+delete_mitigated_blocks(swingBullBoxes, swingBullLabels, true)
+delete_mitigated_blocks(swingBearBoxes, swingBearLabels, false)
+update_boxes_to_current_bar(internalBullBoxes, internalBullLabels)
+update_boxes_to_current_bar(internalBearBoxes, internalBearLabels)
+update_boxes_to_current_bar(swingBullBoxes, swingBullLabels)
+update_boxes_to_current_bar(swingBearBoxes, swingBearLabels)
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertcondition(internalBullTrigger, "Internal Bullish OB", "Internal bullish order block formed")
+alertcondition(internalBearTrigger, "Internal Bearish OB", "Internal bearish order block formed")
+alertcondition(swingBullTrigger, "Swing Bullish OB", "Swing bullish order block formed")
+alertcondition(swingBearTrigger, "Swing Bearish OB", "Swing bearish order block formed")

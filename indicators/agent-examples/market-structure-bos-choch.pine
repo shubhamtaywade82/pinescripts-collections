@@ -1,0 +1,260 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Lux-style simplified structure engine with centered BOS/CHoCH signal lines.
+
+//@version=6
+indicator("Market Structure BOS & CHoCH [Agent Example]", "MS · AE", overlay=true, max_lines_count=300, max_labels_count=300)
+
+//------------------------------------------------------------------------------
+// Constants (Lux-style naming)
+//------------------------------------------------------------------------------
+BULLISH = 1
+BEARISH = -1
+
+GREEN = #089981
+RED = #F23645
+MONO_BULLISH = #b2b5be
+MONO_BEARISH = #5d606b
+
+HISTORICAL = "Historical"
+PRESENT = "Present"
+
+COLORED = "Colored"
+MONOCHROME = "Monochrome"
+
+ALL = "All"
+BOS = "BOS"
+CHOCH = "CHoCH"
+
+TINY = "Tiny"
+SMALL = "Small"
+NORMAL = "Normal"
+
+SOLID = "Solid"
+DASHED = "Dashed"
+DOTTED = "Dotted"
+
+SMART_GROUP = "Smart Money Concepts"
+INTERNAL_GROUP = "Real Time Internal Structure"
+SWING_GROUP = "Real Time Swing Structure"
+SIGNALS_GROUP = "Signal Rendering"
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+modeInput = input.string(HISTORICAL, "Mode", group=SMART_GROUP, options=[HISTORICAL, PRESENT])
+styleInput = input.string(COLORED, "Style", group=SMART_GROUP, options=[COLORED, MONOCHROME])
+
+showInternalsInput = input.bool(true, "Show Internal Structure", group=INTERNAL_GROUP)
+showInternalBullInput = input.string(ALL, "Bullish Structure", group=INTERNAL_GROUP, inline="ibull", options=[ALL, BOS, CHOCH])
+internalBullColorInput = input.color(color.new(GREEN, 25), "", group=INTERNAL_GROUP, inline="ibull")
+showInternalBearInput = input.string(ALL, "Bearish Structure", group=INTERNAL_GROUP, inline="ibear", options=[ALL, BOS, CHOCH])
+internalBearColorInput = input.color(color.new(RED, 25), "", group=INTERNAL_GROUP, inline="ibear")
+internalStructureSize = input.string(TINY, "Internal Label Size", group=INTERNAL_GROUP, options=[TINY, SMALL, NORMAL])
+internalLengthInput = input.int(2, "Internal Pivot Length", minval=1, maxval=10, group=INTERNAL_GROUP)
+internalLineStyleInput = input.string(DASHED, "Internal Line Style", group=INTERNAL_GROUP, options=[SOLID, DASHED, DOTTED])
+internalLineWidthInput = input.int(1, "Internal Line Width", minval=1, maxval=4, group=INTERNAL_GROUP)
+internalPrefixInput = input.bool(true, "Prefix Internal Labels (i)", group=INTERNAL_GROUP)
+
+showStructureInput = input.bool(true, "Show Swing Structure", group=SWING_GROUP)
+showSwingBullInput = input.string(ALL, "Bullish Structure", group=SWING_GROUP, inline="bull", options=[ALL, BOS, CHOCH])
+swingBullColorInput = input.color(GREEN, "", group=SWING_GROUP, inline="bull")
+showSwingBearInput = input.string(ALL, "Bearish Structure", group=SWING_GROUP, inline="bear", options=[ALL, BOS, CHOCH])
+swingBearColorInput = input.color(RED, "", group=SWING_GROUP, inline="bear")
+swingStructureSize = input.string(SMALL, "Swing Label Size", group=SWING_GROUP, options=[TINY, SMALL, NORMAL])
+swingsLengthInput = input.int(5, "Swing Length", minval=3, maxval=50, group=SWING_GROUP)
+swingLineStyleInput = input.string(SOLID, "Swing Line Style", group=SWING_GROUP, options=[SOLID, DASHED, DOTTED])
+swingLineWidthInput = input.int(2, "Swing Line Width", minval=1, maxval=4, group=SWING_GROUP)
+swingPrefixInput = input.bool(true, "Prefix Swing Labels (s)", group=SWING_GROUP)
+
+signalLineStyleInput = input.string(SOLID, "Fallback Line Style", group=SIGNALS_GROUP, options=[SOLID, DASHED, DOTTED])
+signalLineWidthInput = input.int(2, "Fallback Line Width", minval=1, maxval=4, group=SIGNALS_GROUP)
+
+//------------------------------------------------------------------------------
+// Types and state
+//------------------------------------------------------------------------------
+type Pivot
+    float currentLevel
+    float lastLevel
+    bool crossed
+    int barIndex
+
+type Trend
+    int bias
+
+var Pivot swingHigh = Pivot.new(na, na, false, na)
+var Pivot swingLow = Pivot.new(na, na, false, na)
+var Pivot internalHigh = Pivot.new(na, na, false, na)
+var Pivot internalLow = Pivot.new(na, na, false, na)
+
+var Trend swingTrend = Trend.new(0)
+var Trend internalTrend = Trend.new(0)
+
+var line[] structureLines = array.new<line>()
+var label[] structureLabels = array.new<label>()
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+getLineStyle(styleInput_) =>
+    switch styleInput_
+        SOLID => line.style_solid
+        DASHED => line.style_dashed
+        DOTTED => line.style_dotted
+        => line.style_solid
+
+getLabelSize(sizeInput_) =>
+    switch sizeInput_
+        TINY => size.tiny
+        SMALL => size.small
+        NORMAL => size.normal
+        => size.tiny
+
+clearPresentDrawingsIfNeeded() =>
+    if modeInput == PRESENT
+        while array.size(structureLines) > 0
+            line.delete(array.pop(structureLines))
+        while array.size(structureLabels) > 0
+            label.delete(array.pop(structureLabels))
+
+trimDrawings(maxCount) =>
+    while array.size(structureLines) > maxCount
+        line.delete(array.shift(structureLines))
+    while array.size(structureLabels) > maxCount
+        label.delete(array.shift(structureLabels))
+
+drawStructureLineWithCenteredLabel(pivotRef, tag, structureColor, labelSizeInput, lineStyleInput, lineWidthInput) =>
+    clearPresentDrawingsIfNeeded()
+    signalLine = line.new(
+         x1=pivotRef.barIndex,
+         y1=pivotRef.currentLevel,
+         x2=bar_index,
+         y2=pivotRef.currentLevel,
+         color=structureColor,
+         width=lineWidthInput,
+         style=getLineStyle(lineStyleInput)
+     )
+    midBar = math.round((pivotRef.barIndex + bar_index) / 2)
+    signalLabel = label.new(
+         x=midBar,
+         y=pivotRef.currentLevel,
+         text=tag,
+         style=label.style_label_center,
+         size=getLabelSize(labelSizeInput),
+         color=color.new(structureColor, 0),
+         textcolor=color.white
+     )
+    array.push(structureLines, signalLine)
+    array.push(structureLabels, signalLabel)
+    trimDrawings(120)
+
+canShowBull(filterInput, tag) =>
+    filterInput == ALL or (filterInput == BOS and tag == BOS) or (filterInput == CHOCH and tag == CHOCH)
+
+canShowBear(filterInput, tag) =>
+    filterInput == ALL or (filterInput == BOS and tag == BOS) or (filterInput == CHOCH and tag == CHOCH)
+
+//------------------------------------------------------------------------------
+// Pivot detection
+//------------------------------------------------------------------------------
+swingHighPivot = ta.pivothigh(high, swingsLengthInput, swingsLengthInput)
+swingLowPivot = ta.pivotlow(low, swingsLengthInput, swingsLengthInput)
+internalHighPivot = ta.pivothigh(high, internalLengthInput, internalLengthInput)
+internalLowPivot = ta.pivotlow(low, internalLengthInput, internalLengthInput)
+
+if not na(swingHighPivot)
+    swingHigh.lastLevel := swingHigh.currentLevel
+    swingHigh.currentLevel := swingHighPivot
+    swingHigh.barIndex := bar_index - swingsLengthInput
+    swingHigh.crossed := false
+
+if not na(swingLowPivot)
+    swingLow.lastLevel := swingLow.currentLevel
+    swingLow.currentLevel := swingLowPivot
+    swingLow.barIndex := bar_index - swingsLengthInput
+    swingLow.crossed := false
+
+if not na(internalHighPivot)
+    internalHigh.lastLevel := internalHigh.currentLevel
+    internalHigh.currentLevel := internalHighPivot
+    internalHigh.barIndex := bar_index - internalLengthInput
+    internalHigh.crossed := false
+
+if not na(internalLowPivot)
+    internalLow.lastLevel := internalLow.currentLevel
+    internalLow.currentLevel := internalLowPivot
+    internalLow.barIndex := bar_index - internalLengthInput
+    internalLow.crossed := false
+
+//------------------------------------------------------------------------------
+// Structure engine
+//------------------------------------------------------------------------------
+swingBullColor = styleInput == MONOCHROME ? MONO_BULLISH : swingBullColorInput
+swingBearColor = styleInput == MONOCHROME ? MONO_BEARISH : swingBearColorInput
+internalBullColor = styleInput == MONOCHROME ? MONO_BULLISH : internalBullColorInput
+internalBearColor = styleInput == MONOCHROME ? MONO_BEARISH : internalBearColorInput
+
+internalBullishBOS = false
+internalBearishBOS = false
+internalBullishCHOCH = false
+internalBearishCHOCH = false
+swingBullishBOS = false
+swingBearishBOS = false
+swingBullishCHOCH = false
+swingBearishCHOCH = false
+
+internalHighCross = ta.crossover(close, nz(internalHigh.currentLevel, close))
+internalLowCross = ta.crossunder(close, nz(internalLow.currentLevel, close))
+swingHighCross = ta.crossover(close, nz(swingHigh.currentLevel, close))
+swingLowCross = ta.crossunder(close, nz(swingLow.currentLevel, close))
+
+if showInternalsInput and not na(internalHigh.currentLevel) and internalHighCross and not internalHigh.crossed
+    internalTag = internalTrend.bias == BEARISH ? CHOCH : BOS
+    internalText = internalPrefixInput ? "i" + internalTag : internalTag
+    if canShowBull(showInternalBullInput, internalTag)
+        drawStructureLineWithCenteredLabel(internalHigh, internalText, internalBullColor, internalStructureSize, internalLineStyleInput, internalLineWidthInput)
+    internalHigh.crossed := true
+    internalTrend.bias := BULLISH
+    internalBullishBOS := internalTag == BOS
+    internalBullishCHOCH := internalTag == CHOCH
+
+if showInternalsInput and not na(internalLow.currentLevel) and internalLowCross and not internalLow.crossed
+    internalTag = internalTrend.bias == BULLISH ? CHOCH : BOS
+    internalText = internalPrefixInput ? "i" + internalTag : internalTag
+    if canShowBear(showInternalBearInput, internalTag)
+        drawStructureLineWithCenteredLabel(internalLow, internalText, internalBearColor, internalStructureSize, internalLineStyleInput, internalLineWidthInput)
+    internalLow.crossed := true
+    internalTrend.bias := BEARISH
+    internalBearishBOS := internalTag == BOS
+    internalBearishCHOCH := internalTag == CHOCH
+
+if showStructureInput and not na(swingHigh.currentLevel) and swingHighCross and not swingHigh.crossed
+    swingTag = swingTrend.bias == BEARISH ? CHOCH : BOS
+    swingText = swingPrefixInput ? "s" + swingTag : swingTag
+    if canShowBull(showSwingBullInput, swingTag)
+        drawStructureLineWithCenteredLabel(swingHigh, swingText, swingBullColor, swingStructureSize, swingLineStyleInput, swingLineWidthInput)
+    swingHigh.crossed := true
+    swingTrend.bias := BULLISH
+    swingBullishBOS := swingTag == BOS
+    swingBullishCHOCH := swingTag == CHOCH
+
+if showStructureInput and not na(swingLow.currentLevel) and swingLowCross and not swingLow.crossed
+    swingTag = swingTrend.bias == BULLISH ? CHOCH : BOS
+    swingText = swingPrefixInput ? "s" + swingTag : swingTag
+    if canShowBear(showSwingBearInput, swingTag)
+        drawStructureLineWithCenteredLabel(swingLow, swingText, swingBearColor, swingStructureSize, swingLineStyleInput, swingLineWidthInput)
+    swingLow.crossed := true
+    swingTrend.bias := BEARISH
+    swingBearishBOS := swingTag == BOS
+    swingBearishCHOCH := swingTag == CHOCH
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertcondition(internalBullishBOS, "Internal Bullish BOS", "Internal Bullish BOS formed")
+alertcondition(internalBullishCHOCH, "Internal Bullish CHoCH", "Internal Bullish CHoCH formed")
+alertcondition(internalBearishBOS, "Internal Bearish BOS", "Internal Bearish BOS formed")
+alertcondition(internalBearishCHOCH, "Internal Bearish CHoCH", "Internal Bearish CHoCH formed")
+alertcondition(swingBullishBOS, "Bullish BOS", "Bullish BOS formed")
+alertcondition(swingBullishCHOCH, "Bullish CHoCH", "Bullish CHoCH formed")
+alertcondition(swingBearishBOS, "Bearish BOS", "Bearish BOS formed")
+alertcondition(swingBearishCHOCH, "Bearish CHoCH", "Bearish CHoCH formed")

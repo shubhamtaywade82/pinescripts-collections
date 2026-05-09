@@ -1,0 +1,68 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Strategy derived from pinescript-agents/examples/simple/mtf-trend-alignment.pine for backtesting in pinescripts-collections.
+
+//@version=6
+strategy("MTF Trend Alignment [Agent Example]", shorttitle="MTFTrStr", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+ma_type = input.string("EMA", "MA Type", options=["SMA", "EMA", "WMA"], group="Settings")
+ma_length = input.int(20, "MA Length", minval=5, maxval=200, group="Settings")
+
+tf1 = input.timeframe("15", "Timeframe 1", group="Timeframes")
+tf2 = input.timeframe("60", "Timeframe 2", group="Timeframes")
+tf3 = input.timeframe("240", "Timeframe 3", group="Timeframes")
+tf4 = input.timeframe("1D", "Timeframe 4", group="Timeframes")
+
+exit_when_misaligned = input.bool(true, "Exit When Score < 4 / > -4", group="Risk")
+bullColorInput = input.color(#089981, "Bullish Color", group="Visuals")
+bearColorInput = input.color(#f23645, "Bearish Color", group="Visuals")
+
+get_ma(src, length, ma_type_) =>
+    switch ma_type_
+        "SMA" => ta.sma(src, length)
+        "EMA" => ta.ema(src, length)
+        "WMA" => ta.wma(src, length)
+        => ta.ema(src, length)
+
+get_trend(ma_value, close_value) =>
+    if close_value > ma_value
+        1
+    else if close_value < ma_value
+        -1
+    else
+        0
+
+ma_tf1 = request.security(syminfo.tickerid, tf1, get_ma(close, ma_length, ma_type), lookahead=barmerge.lookahead_off)
+ma_tf2 = request.security(syminfo.tickerid, tf2, get_ma(close, ma_length, ma_type), lookahead=barmerge.lookahead_off)
+ma_tf3 = request.security(syminfo.tickerid, tf3, get_ma(close, ma_length, ma_type), lookahead=barmerge.lookahead_off)
+ma_tf4 = request.security(syminfo.tickerid, tf4, get_ma(close, ma_length, ma_type), lookahead=barmerge.lookahead_off)
+
+close_tf1 = request.security(syminfo.tickerid, tf1, close, lookahead=barmerge.lookahead_off)
+close_tf2 = request.security(syminfo.tickerid, tf2, close, lookahead=barmerge.lookahead_off)
+close_tf3 = request.security(syminfo.tickerid, tf3, close, lookahead=barmerge.lookahead_off)
+close_tf4 = request.security(syminfo.tickerid, tf4, close, lookahead=barmerge.lookahead_off)
+
+trend_tf1 = get_trend(ma_tf1, close_tf1)
+trend_tf2 = get_trend(ma_tf2, close_tf2)
+trend_tf3 = get_trend(ma_tf3, close_tf3)
+trend_tf4 = get_trend(ma_tf4, close_tf4)
+
+trend_score = trend_tf1 + trend_tf2 + trend_tf3 + trend_tf4
+
+longSignal = trend_score == 4
+shortSignal = trend_score == -4
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+if exit_when_misaligned
+    if strategy.position_size > 0 and trend_score < 4
+        strategy.close("Long")
+    if strategy.position_size < 0 and trend_score > -4
+        strategy.close("Short")
+
+plot(trend_score, "Trend Score", color=trend_score > 0 ? bullColorInput : trend_score < 0 ? bearColorInput : color.new(#2a2e39, 0), linewidth=2)
+hline(4, "All Bullish", color=color.new(bullColorInput, 35))
+hline(-4, "All Bearish", color=color.new(bearColorInput, 35))
+bgcolor(trend_score == 4 ? color.new(bullColorInput, 92) : trend_score == -4 ? color.new(bearColorInput, 92) : na, title="Full Alignment")

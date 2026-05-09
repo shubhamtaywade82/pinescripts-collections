@@ -1,0 +1,79 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Strategy derived from pinescript-agents/examples/intermediate/multi-timeframe-rsi.pine for backtesting in pinescripts-collections.
+
+//@version=6
+strategy("MTF RSI Confluence [Agent Example]", shorttitle="MTFRSISt", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+rsiLength = input.int(14, "RSI Length", minval=1, group="RSI")
+rsiSource = input.source(close, "Source", group="RSI")
+
+tf1 = input.timeframe("", "TF1 (blank = chart)", group="Timeframes")
+tf2 = input.timeframe("15", "Timeframe 2", group="Timeframes")
+tf3 = input.timeframe("60", "Timeframe 3", group="Timeframes")
+tf4 = input.timeframe("240", "Timeframe 4", group="Timeframes")
+
+lookbackBars = input.int(50, "Divergence Lookback", minval=10, group="Divergence")
+
+oversold = input.int(30, "Oversold", group="Levels")
+overbought = input.int(70, "Overbought", group="Levels")
+
+bullThreshold = input.float(2.0, "Long: confluence >", step=0.25, group="Signals")
+bearThreshold = input.float(-2.0, "Short: confluence <", step=0.25, group="Signals")
+bullColorInput = input.color(#089981, "Bullish Color", group="Visuals")
+bearColorInput = input.color(#f23645, "Bearish Color", group="Visuals")
+
+rsi_tf1 = tf1 == "" ? ta.rsi(rsiSource, rsiLength) : request.security(syminfo.tickerid, tf1, ta.rsi(rsiSource, rsiLength), lookahead=barmerge.lookahead_off)
+rsi2 = request.security(syminfo.tickerid, tf2, ta.rsi(rsiSource, rsiLength), lookahead=barmerge.lookahead_off)
+rsi3 = request.security(syminfo.tickerid, tf3, ta.rsi(rsiSource, rsiLength), lookahead=barmerge.lookahead_off)
+rsi4 = request.security(syminfo.tickerid, tf4, ta.rsi(rsiSource, rsiLength), lookahead=barmerge.lookahead_off)
+
+rsi1 = rsi_tf1
+
+pivotHigh = ta.pivothigh(high, 5, 5)
+pivotLow = ta.pivotlow(low, 5, 5)
+
+var float lastPivotHighPrice = na
+var float lastPivotHighRSI = na
+var int lastPivotHighBar = na
+var float lastPivotLowPrice = na
+var float lastPivotLowRSI = na
+var int lastPivotLowBar = na
+
+if not na(pivotHigh)
+    lastPivotHighPrice := high[5]
+    lastPivotHighRSI := rsi1[5]
+    lastPivotHighBar := bar_index - 5
+
+if not na(pivotLow)
+    lastPivotLowPrice := low[5]
+    lastPivotLowRSI := rsi1[5]
+    lastPivotLowBar := bar_index - 5
+
+var bool bullishDiv = false
+var bool bearishDiv = false
+bullishDiv := false
+bearishDiv := false
+if not na(pivotLow) and not na(lastPivotLowPrice) and bar_index - lastPivotLowBar < lookbackBars and low[5] < lastPivotLowPrice and rsi1[5] > lastPivotLowRSI
+    bullishDiv := true
+if not na(pivotHigh) and not na(lastPivotHighPrice) and bar_index - lastPivotHighBar < lookbackBars and high[5] > lastPivotHighPrice and rsi1[5] < lastPivotHighRSI
+    bearishDiv := true
+
+confluenceScore = (rsi1 < oversold ? 1.0 : 0.0) + (rsi2 < oversold ? 0.75 : 0.0) + (rsi3 < oversold ? 0.5 : 0.0) + (rsi4 < oversold ? 0.25 : 0.0) - (rsi1 > overbought ? 1.0 : 0.0) - (rsi2 > overbought ? 0.75 : 0.0) - (rsi3 > overbought ? 0.5 : 0.0) - (rsi4 > overbought ? 0.25 : 0.0) + (bullishDiv ? 2.0 : 0.0) - (bearishDiv ? 2.0 : 0.0)
+
+longSignal = confluenceScore > bullThreshold
+shortSignal = confluenceScore < bearThreshold
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size > 0 and confluenceScore < bullThreshold
+    strategy.close("Long")
+if strategy.position_size < 0 and confluenceScore > bearThreshold
+    strategy.close("Short")
+
+plot(confluenceScore, "Confluence Score", color=confluenceScore > 0 ? bullColorInput : confluenceScore < 0 ? bearColorInput : color.new(#2a2e39, 0), linewidth=2, style=plot.style_stepline)
+hline(0, "Neutral", color=color.new(#2a2e39, 40))
+plotshape(longSignal, "Long Signal", shape.triangleup, location.belowbar, color.new(bullColorInput, 0), size=size.tiny, text="L")
+plotshape(shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.new(bearColorInput, 0), size=size.tiny, text="S")

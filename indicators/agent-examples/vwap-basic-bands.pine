@@ -1,0 +1,62 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Ported from pinescript-agents/examples/simple/vwap-basic.pine for local testing in pinescripts-collections.
+
+//@version=6
+indicator("VWAP Basic [Agent Example]", "VWAP · AE", overlay=true)
+
+anchor_period = input.string("Session", "Anchor Period", options=["Session", "Week", "Month"], group="Settings")
+show_bands = input.bool(true, "Show Standard Deviation Bands", group="Display")
+std_mult1 = input.float(1.0, "1st StdDev Multiplier", minval=0.1, maxval=5.0, group="Bands")
+std_mult2 = input.float(2.0, "2nd StdDev Multiplier", minval=0.1, maxval=5.0, group="Bands")
+vwap_color = input.color(color.blue, "VWAP Color", group="Colors")
+band_color = input.color(color.gray, "Band Color", group="Colors")
+bullColorInput = input.color(#089981, "Bullish Color", group="Colors")
+bearColorInput = input.color(#f23645, "Bearish Color", group="Colors")
+
+var float sum_pv = 0.0
+var float sum_v = 0.0
+var float sum_pv2 = 0.0
+
+is_new_period() =>
+    switch anchor_period
+        "Session" => timeframe.change("1D")
+        "Week" => timeframe.change("1W")
+        "Month" => timeframe.change("1M")
+        => false
+
+typ_price = hlc3
+
+if is_new_period()
+    sum_pv := 0.0
+    sum_v := 0.0
+    sum_pv2 := 0.0
+
+sum_pv += typ_price * volume
+sum_v += volume
+sum_pv2 += typ_price * typ_price * volume
+
+vwap_value = sum_v > 0 ? sum_pv / sum_v : na
+variance = sum_v > 0 and not na(vwap_value) ? (sum_pv2 / sum_v) - (vwap_value * vwap_value) : na
+std_dev = not na(variance) and variance >= 0 ? math.sqrt(variance) : na
+
+upper_band1 = not na(vwap_value) and not na(std_dev) ? vwap_value + (std_dev * std_mult1) : na
+lower_band1 = not na(vwap_value) and not na(std_dev) ? vwap_value - (std_dev * std_mult1) : na
+upper_band2 = not na(vwap_value) and not na(std_dev) ? vwap_value + (std_dev * std_mult2) : na
+lower_band2 = not na(vwap_value) and not na(std_dev) ? vwap_value - (std_dev * std_mult2) : na
+
+plot(vwap_value, title="VWAP", color=vwap_color, linewidth=2)
+
+p_ub1 = plot(show_bands ? upper_band1 : na, title="Upper Band 1", color=color.new(band_color, 50), linewidth=1)
+p_lb1 = plot(show_bands ? lower_band1 : na, title="Lower Band 1", color=color.new(band_color, 50), linewidth=1)
+plot(show_bands ? upper_band2 : na, title="Upper Band 2", color=color.new(band_color, 70), linewidth=1)
+plot(show_bands ? lower_band2 : na, title="Lower Band 2", color=color.new(band_color, 70), linewidth=1)
+
+fill(p_ub1, p_lb1, color=color.new(band_color, 90), title="VWAP Channel")
+
+var table info_table = table.new(position.top_right, 2, 4, bgcolor=color.new(#0b0e14, 25), border_width=1, border_color=color.new(#2a2e39, 40))
+if barstate.islast
+    table.cell(info_table, 0, 0, "VWAP", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 0, str.tostring(vwap_value, "#.####"), text_color=vwap_color, text_size=size.small)
+    table.cell(info_table, 0, 1, "Distance", text_color=color.white, text_size=size.small)
+    dist_pct = not na(vwap_value) and vwap_value != 0 ? ((close - vwap_value) / vwap_value) * 100 : na
+    table.cell(info_table, 1, 1, str.tostring(dist_pct, "#.##") + "%", text_color=close > vwap_value ? bullColorInput : bearColorInput, text_size=size.small)

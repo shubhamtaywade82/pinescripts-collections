@@ -1,0 +1,121 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Ported from pinescript-agents/examples/simple/pivot-points-traditional.pine for local testing in pinescripts-collections.
+
+//@version=6
+indicator("Traditional Pivot Points [Agent Example]", "Pivots · AE", overlay=true, max_lines_count=500, max_labels_count=500)
+
+pivot_type = input.string("Traditional", "Pivot Type", options=["Traditional", "Fibonacci", "Camarilla"], group="Settings")
+show_labels = input.bool(true, "Show Labels", group="Display")
+show_levels = input.bool(true, "Show Levels", group="Display")
+line_extend = input.int(20, "Line Extension", minval=5, maxval=100, group="Display")
+extend_left = input.bool(true, "Extend Lines Left", group="Display")
+
+pivot_color = input.color(color.new(#ffd166, 0), "Pivot Color", group="Colors")
+support_color = input.color(#089981, "Support Color", group="Colors")
+resistance_color = input.color(#f23645, "Resistance Color", group="Colors")
+
+var line[] pivot_lines = array.new<line>()
+var label[] pivot_labels = array.new<label>()
+
+get_prev_ohlc() =>
+    prev_high = request.security(syminfo.tickerid, "1D", high[1], lookahead=barmerge.lookahead_off)
+    prev_low = request.security(syminfo.tickerid, "1D", low[1], lookahead=barmerge.lookahead_off)
+    prev_close = request.security(syminfo.tickerid, "1D", close[1], lookahead=barmerge.lookahead_off)
+    [prev_high, prev_low, prev_close]
+
+calculate_pivots(high_prev, low_prev, close_prev, pivot_type_) =>
+    pivot_point = (high_prev + low_prev + close_prev) / 3
+    if pivot_type_ == "Traditional"
+        r1 = 2 * pivot_point - low_prev
+        s1 = 2 * pivot_point - high_prev
+        r2 = pivot_point + (high_prev - low_prev)
+        s2 = pivot_point - (high_prev - low_prev)
+        r3 = high_prev + 2 * (pivot_point - low_prev)
+        s3 = low_prev - 2 * (high_prev - pivot_point)
+        [pivot_point, r1, r2, r3, s1, s2, s3]
+    else if pivot_type_ == "Fibonacci"
+        r1 = pivot_point + 0.382 * (high_prev - low_prev)
+        s1 = pivot_point - 0.382 * (high_prev - low_prev)
+        r2 = pivot_point + 0.618 * (high_prev - low_prev)
+        s2 = pivot_point - 0.618 * (high_prev - low_prev)
+        r3 = pivot_point + (high_prev - low_prev)
+        s3 = pivot_point - (high_prev - low_prev)
+        [pivot_point, r1, r2, r3, s1, s2, s3]
+    else
+        range_ = high_prev - low_prev
+        r1 = close_prev + range_ * 0.0916
+        s1 = close_prev - range_ * 0.0916
+        r2 = close_prev + range_ * 0.183
+        s2 = close_prev - range_ * 0.183
+        r3 = close_prev + range_ * 0.275
+        s3 = close_prev - range_ * 0.275
+        [close_prev, r1, r2, r3, s1, s2, s3]
+
+draw_pivot_line(price, line_color, line_style, label_text) =>
+    start_bar = bar_index - line_extend
+    end_bar = extend_left ? bar_index : bar_index + line_extend
+    line_extend_mode = extend_left ? extend.left : extend.none
+    if show_levels
+        pivot_line = line.new(start_bar, price, end_bar, price, color=line_color, width=1, style=line_style, extend=line_extend_mode)
+        array.push(pivot_lines, pivot_line)
+    if show_labels
+        label_with_price = label_text + " " + str.tostring(price, "#.##")
+        pivot_label = label.new(end_bar, price, text=label_with_price, color=line_color, textcolor=color.white, size=size.small, style=label.style_label_left)
+        array.push(pivot_labels, pivot_label)
+
+clear_drawings() =>
+    while array.size(pivot_lines) > 0
+        line.delete(array.pop(pivot_lines))
+    array.clear(pivot_lines)
+    while array.size(pivot_labels) > 0
+        label.delete(array.pop(pivot_labels))
+    array.clear(pivot_labels)
+
+live_levels(pt) =>
+    [h, l, c] = get_prev_ohlc()
+    if not na(h) and not na(l) and not na(c)
+        calculate_pivots(h, l, c, pt)
+    else
+        [na, na, na, na, na, na, na]
+
+[pp_live, r1_live, r2_unused, r3_unused, s1_live, s2_unused, s3_unused] = live_levels(pivot_type)
+
+if timeframe.change("1D") or barstate.isfirst or barstate.islast
+    clear_drawings()
+    [prev_high, prev_low, prev_close] = get_prev_ohlc()
+    if not na(prev_high) and not na(prev_low) and not na(prev_close)
+        [pp, r1, r2, r3, s1, s2, s3] = calculate_pivots(prev_high, prev_low, prev_close, pivot_type)
+        draw_pivot_line(pp, pivot_color, line.style_solid, "PP")
+        draw_pivot_line(r1, resistance_color, line.style_solid, "R1")
+        draw_pivot_line(r2, resistance_color, line.style_dashed, "R2")
+        draw_pivot_line(r3, resistance_color, line.style_dotted, "R3")
+        draw_pivot_line(s1, support_color, line.style_solid, "S1")
+        draw_pivot_line(s2, support_color, line.style_dashed, "S2")
+        draw_pivot_line(s3, support_color, line.style_dotted, "S3")
+
+var table pivot_table = table.new(position.top_right, 2, 8, bgcolor=color.new(#0b0e14, 25), border_width=1, border_color=color.new(#2a2e39, 40))
+if barstate.islast
+    [prev_high_t, prev_low_t, prev_close_t] = get_prev_ohlc()
+    if not na(prev_high_t) and not na(prev_low_t) and not na(prev_close_t)
+        [pp_t, r1_t, r2_t, r3_t, s1_t, s2_t, s3_t] = calculate_pivots(prev_high_t, prev_low_t, prev_close_t, pivot_type)
+        table.cell(pivot_table, 0, 0, "Pivot Levels", text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 1, 0, "Price", text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 1, "R3", text_color=color.red, text_size=size.small)
+        table.cell(pivot_table, 1, 1, str.tostring(r3_t, "#.####"), text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 2, "R2", text_color=color.red, text_size=size.small)
+        table.cell(pivot_table, 1, 2, str.tostring(r2_t, "#.####"), text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 3, "R1", text_color=color.red, text_size=size.small)
+        table.cell(pivot_table, 1, 3, str.tostring(r1_t, "#.####"), text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 4, "PP", text_color=pivot_color, text_size=size.small)
+        table.cell(pivot_table, 1, 4, str.tostring(pp_t, "#.####"), text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 5, "S1", text_color=color.green, text_size=size.small)
+        table.cell(pivot_table, 1, 5, str.tostring(s1_t, "#.####"), text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 6, "S2", text_color=color.green, text_size=size.small)
+        table.cell(pivot_table, 1, 6, str.tostring(s2_t, "#.####"), text_color=color.white, text_size=size.small)
+        table.cell(pivot_table, 0, 7, "S3", text_color=color.green, text_size=size.small)
+        table.cell(pivot_table, 1, 7, str.tostring(s3_t, "#.####"), text_color=color.white, text_size=size.small)
+
+alertcondition(ta.crossover(close, pp_live), "PP Break Up", "Price crossed above Pivot Point")
+alertcondition(ta.crossunder(close, pp_live), "PP Break Down", "Price crossed below Pivot Point")
+alertcondition(ta.crossover(close, r1_live), "R1 Break", "Price crossed above R1")
+alertcondition(ta.crossunder(close, s1_live), "S1 Break", "Price crossed below S1")
