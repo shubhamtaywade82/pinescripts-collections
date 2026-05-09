@@ -40,3 +40,27 @@ When adding a new script, place it under the closest topic folder inside `indica
 
 - In-repo Pine assistant onboarding and rules: `pinescript-agents/CLAUDE.md`
 - v6 language and patterns: `pinescript-agents/docs/pinescript-v6/`
+
+## Default implementation references (required)
+
+When building any **new Pine indicator or strategy** in this repo, agents must reference both:
+
+1. `pinescript-agents` skills/docs (workflow + syntax/behavior guidance), and
+2. the local advanced examples under `indicators/agent-examples/` as style/UX baselines.
+
+Use these local files as default implementation/style references unless the user explicitly asks otherwise:
+
+- `indicators/agent-examples/market-structure-bos-choch.pine`
+- `indicators/agent-examples/order-blocks-simple.pine`
+- `indicators/agent-examples/pivot-points-traditional.pine`
+- `indicators/agent-examples/support-resistance-basic.pine`
+- `indicators/agent-examples/bollinger-squeeze-detector.pine`
+- `indicators/agent-examples/mtf-trend-alignment.pine`
+- `indicators/agent-examples/multi-timeframe-rsi.pine`
+
+Expected style alignment for new scripts:
+
+- Lux-style grouped inputs and naming (`Mode`, `Style`, structure/signal/visual groups).
+- Consistent color system (`#089981` bullish, `#f23645` bearish, neutral muted grays).
+- Drawings/labels that remain readable on dark themes.
+- Stable behavior for history-sensitive functions (compute series globally when needed).
