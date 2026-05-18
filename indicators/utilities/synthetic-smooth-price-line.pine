@@ -1,0 +1,160 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © nemesis
+
+//@version=6
+indicator(
+     title="Custom Synthetic Smooth Price Line",
+     shorttitle="SynthLine",
+     overlay=true,
+     max_lines_count=2
+)
+
+// ─────────────────────────────────────────────────────────────
+// PRICE LINE INPUTS
+// ─────────────────────────────────────────────────────────────
+
+lineModeInput = input.string(title="Color Mode", defval="Candles", options=["Default", "Candles"], group="Price Line")
+lineColorDefaultInput = input.color(color.silver, "Default", group="Price Line")
+lineColorRisingInput = input.color(#089981, "Candles Rising", group="Price Line")
+lineColorFallingInput = input.color(#f23645, "Candles Falling", group="Price Line")
+lineStyleInput = input.string(title="Style", defval="Dotted", options=["Dotted", "Dashed", "Solid"], group="Price Line")
+lineThicknessInput = input.string(title="Thickness", defval="1", options=["1", "2", "3", "4"], group="Price Line")
+lineLengthInput = input.int(title="Length (bars)", minval=0, maxval=500, defval=150, group="Price Line")
+lineExtendLeftInput = input.bool(false, "Extend Left", group="Price Line")
+lineExtendRightInput = input.bool(true, "Extend Right", group="Price Line")
+
+// ─────────────────────────────────────────────────────────────
+// SECONDARY LINE INPUTS
+// ─────────────────────────────────────────────────────────────
+
+secondLineShowInput = input.bool(true, "Show Secondary Line", group="Secondary Line")
+secondLineModeInput = input.string(title="Color Mode", defval="Default", options=["Default", "Candles"], group="Secondary Line")
+secondLineColorDefaultInput = input.color(color.new(color.silver, 30), "Default", group="Secondary Line")
+secondLineColorRisingInput = input.color(color.new(#089981, 50), "Candles Rising", group="Secondary Line")
+secondLineColorFallingInput = input.color(color.new(#f23645, 50), "Candles Falling", group="Secondary Line")
+secondLineStyleInput = input.string(title="Style", defval="Dashed", options=["Dotted", "Dashed", "Solid"], group="Secondary Line")
+secondLineThicknessInput = input.string(title="Thickness", defval="1", options=["1", "2", "3", "4"], group="Secondary Line")
+secondLineLengthInput = input.int(title="Length (bars)", minval=0, maxval=500, defval=0, group="Secondary Line")
+secondLineExtendLeftInput = input.bool(true, "Extend Left", group="Secondary Line")
+secondLineExtendRightInput = input.bool(false, "Extend Right", group="Secondary Line")
+
+// ─────────────────────────────────────────────────────────────
+// SYNTHETIC MOVEMENT INPUTS
+// ─────────────────────────────────────────────────────────────
+
+enableSyntheticInput = input.bool(true, "Enable Synthetic Movement", group="Synthetic Movement")
+subTickDivisor = input.int(100, "Sub-Tick Divisions", minval=2, maxval=1000, step=10, group="Synthetic Movement", tooltip="Splits each mintick into N micro-steps. e.g. mintick=0.01, divisions=100 → step=0.0001. Higher = smoother, slower catch-up.")
+showDotInput = input.bool(false, "Show Dot", group="Synthetic Movement")
+dotColorInput = input.color(color.black, "Dot Color", group="Synthetic Movement")
+dotSizeInput = input.string("Tiny", "Dot Size", options=["Auto", "Tiny", "Small"], group="Synthetic Movement")
+
+// ─────────────────────────────────────────────────────────────
+// STYLE MAPPING (no `var` — must recalculate on input change)
+// ─────────────────────────────────────────────────────────────
+
+lineStyle = switch lineStyleInput
+    "Solid"  => line.style_solid
+    "Dotted" => line.style_dotted
+    => line.style_dashed
+
+lineThickness = switch lineThicknessInput
+    "2" => 2
+    "3" => 3
+    "4" => 4
+    => 1
+
+lineExtension = lineExtendLeftInput and lineExtendRightInput ? extend.both : lineExtendLeftInput ? extend.left : lineExtendRightInput ? extend.right : extend.none
+
+secondLineStyle = switch secondLineStyleInput
+    "Solid"  => line.style_solid
+    "Dotted" => line.style_dotted
+    => line.style_dashed
+
+secondLineThickness = switch secondLineThicknessInput
+    "2" => 2
+    "3" => 3
+    "4" => 4
+    => 1
+
+secondLineExtension = secondLineExtendLeftInput and secondLineExtendRightInput ? extend.both : secondLineExtendLeftInput ? extend.left : secondLineExtendRightInput ? extend.right : extend.none
+
+mainLength = math.max(lineLengthInput, 1)
+secondLength = math.max(secondLineLengthInput, 1)
+
+// ─────────────────────────────────────────────────────────────
+// SYNTHETIC SMOOTH PRICE ENGINE
+//
+// Pure linear stepper: each realtime tick moves `price` by
+// exactly (mintick × stepsPerTick) toward close.
+//   e.g. mintick=0.01, stepsPerTick=1 →
+//        100.00 → 100.01 → 100.02 → ... → 100.50
+// ─────────────────────────────────────────────────────────────
+
+varip float price = na
+
+if na(price)
+    price := close
+
+stepSize = syminfo.mintick / subTickDivisor
+targetPrice = close
+delta = targetPrice - price
+distance = math.abs(delta)
+
+if barstate.islast and enableSyntheticInput
+    if distance > stepSize
+        price := delta > 0 ? price + stepSize : price - stepSize
+    else
+        price := targetPrice
+
+if not enableSyntheticInput
+    price := close
+
+// ─────────────────────────────────────────────────────────────
+// COLOR ENGINE
+// ─────────────────────────────────────────────────────────────
+
+lineColor = lineModeInput == "Candles" ? (price >= open ? lineColorRisingInput : lineColorFallingInput) : lineColorDefaultInput
+
+secondLineColor = secondLineModeInput == "Candles" ? (price >= open ? secondLineColorRisingInput : secondLineColorFallingInput) : secondLineColorDefaultInput
+
+// ─────────────────────────────────────────────────────────────
+// MAIN PRICE LINE
+// ─────────────────────────────────────────────────────────────
+
+var line priceLine = na
+
+if barstate.islast
+    if na(priceLine)
+        priceLine := line.new(x1=bar_index - mainLength, y1=price, x2=bar_index, y2=price, xloc=xloc.bar_index, extend=lineExtension, color=lineColor, style=lineStyle, width=lineThickness)
+    else
+        line.set_xy1(priceLine, bar_index - mainLength, price)
+        line.set_xy2(priceLine, bar_index, price)
+        line.set_color(priceLine, lineColor)
+        line.set_style(priceLine, lineStyle)
+        line.set_width(priceLine, lineThickness)
+        line.set_extend(priceLine, lineExtension)
+
+// ─────────────────────────────────────────────────────────────
+// SECONDARY LINE
+// ─────────────────────────────────────────────────────────────
+
+var line secondPriceLine = na
+
+if barstate.islast and secondLineShowInput
+    if na(secondPriceLine)
+        secondPriceLine := line.new(x1=bar_index - secondLength, y1=price, x2=bar_index, y2=price, xloc=xloc.bar_index, extend=secondLineExtension, color=secondLineColor, style=secondLineStyle, width=secondLineThickness)
+    else
+        line.set_xy1(secondPriceLine, bar_index - secondLength, price)
+        line.set_xy2(secondPriceLine, bar_index, price)
+        line.set_color(secondPriceLine, secondLineColor)
+        line.set_style(secondPriceLine, secondLineStyle)
+        line.set_width(secondPriceLine, secondLineThickness)
+        line.set_extend(secondPriceLine, secondLineExtension)
+
+// ─────────────────────────────────────────────────────────────
+// OPTIONAL DOT (separate plotchar per size — `size` must be const)
+// ─────────────────────────────────────────────────────────────
+
+plotchar(showDotInput and dotSizeInput == "Auto" ? price : na, title="Price Dot Auto", location=location.absolute, char="•", color=dotColorInput, size=size.auto)
+plotchar(showDotInput and dotSizeInput == "Tiny" ? price : na, title="Price Dot Tiny", location=location.absolute, char="•", color=dotColorInput, size=size.tiny)
+plotchar(showDotInput and dotSizeInput == "Small" ? price : na, title="Price Dot Small", location=location.absolute, char="•", color=dotColorInput, size=size.small)
