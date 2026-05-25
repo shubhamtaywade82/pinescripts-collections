@@ -1,0 +1,488 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+//@version=6
+indicator("Adaptive Supertrend Pro — Institutional v6", shorttitle="AST Pro", overlay=true, max_lines_count=500, max_labels_count=500, max_bars_back=2001)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INSTITUTIONAL ADAPTIVE SUPERTREND PRO — CRYPTO FUTURES PERPETUAL (Pine v6)
+// ══════════════════════════════════════════════════════════════════════════════
+// Architecture: State-machine regime engine → Setup formation → Execution gate
+// Non-repainting by design: ALL signals on confirmed bar closes only
+// Institutional-grade: Correlated-filter elimination, dynamic risk, HTF hierarchy
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — REGIME ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+grpRegime = "1. Regime Engine"
+regimeAtrLen     = input.int(14, "Regime ATR Length", minval=1, maxval=50, group=grpRegime)
+regimeAtrLookback= input.int(100, "Volatility Percentile Lookback", minval=20, maxval=500, group=grpRegime)
+adxLen           = input.int(14, "ADX Length", minval=1, group=grpRegime)
+adxTrendThresh   = input.int(25, "ADX Trend Threshold", minval=10, maxval=50, group=grpRegime)
+volPercentileTh  = input.int(70, "Volume Percentile Threshold", minval=50, maxval=95, group=grpRegime, tooltip="Volume must be above this percentile of its lookback to qualify as expansion")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — ADAPTIVE SUPERTREND CORE
+// ══════════════════════════════════════════════════════════════════════════════
+grpCore = "2. Adaptive Supertrend Core"
+atrPeriod        = input.int(10, "Base ATR Length", minval=1, maxval=50, group=grpCore)
+baseMult         = input.float(3.0, "Base Multiplier", minval=0.1, step=0.1, group=grpCore)
+useWickMode      = input.bool(true, "Wick-Aware Flip Mode", group=grpCore, tooltip="Uses high/low for flip detection. CRITICAL for crypto liquidation wicks.")
+minMult          = input.float(1.2, "Minimum Multiplier", minval=0.1, step=0.1, group=grpCore)
+maxMult          = input.float(5.0, "Maximum Multiplier", minval=0.5, step=0.1, group=grpCore)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — HTF HIERARCHY (Non-Repaint)
+// ══════════════════════════════════════════════════════════════════════════════
+grpHTF = "3. HTF Hierarchy (Non-Repaint)"
+htfTimeframe     = input.timeframe("240", "HTF Timeframe", group=grpHTF)
+htfEmaLen        = input.int(50, "HTF EMA Length", minval=10, group=grpHTF)
+htfAtrLen        = input.int(14, "HTF ATR Length", minval=1, group=grpHTF)
+requireHTFConfirm= input.bool(true, "Require HTF Confirmed Close Only", group=grpHTF, tooltip="Uses barstate.isconfirmed on HTF. Eliminates HTF repaint.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — LIQUIDITY & STRUCTURE
+// ══════════════════════════════════════════════════════════════════════════════
+grpLiq = "4. Liquidity & Structure"
+sweepLookback    = input.int(20, "Liquidity Sweep Lookback", minval=5, maxval=100, group=grpLiq)
+sweepThreshold   = input.float(0.3, "Sweep Threshold (ATR)", minval=0.1, step=0.1, group=grpLiq, tooltip="Wick beyond equal high/low must exceed this ATR multiple to qualify as sweep")
+showStructure    = input.bool(true, "Show Structure Points", group=grpLiq)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — EXECUTION GATE
+// ══════════════════════════════════════════════════════════════════════════════
+grpExec = "5. Execution Gate"
+requirePullback  = input.bool(true, "Require Pullback Entry (Not Flip)", group=grpExec, tooltip="Waits for price to return to band after flip. Eliminates chasing.")
+pullbackMaxDist  = input.float(0.5, "Max Pullback Distance (ATR)", minval=0.1, step=0.1, group=grpExec, tooltip="Entry must occur within this ATR distance of the band after flip")
+requireVolConfirm= input.bool(true, "Require Volume Confirmation", group=grpExec)
+minSignalScore   = input.int(70, "Minimum Signal Score", minval=0, maxval=100, group=grpExec)
+blockChop        = input.bool(true, "Block All Signals in CHOP Regime", group=grpExec)
+cooldownBars     = input.int(5, "Signal Cooldown (bars)", minval=0, group=grpExec)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — RISK ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+grpRisk = "6. Risk Engine"
+accountRiskPct   = input.float(1.0, "Account Risk %", minval=0.1, maxval=5.0, step=0.1, group=grpRisk)
+maxDailyLossPct  = input.float(3.0, "Max Daily Loss %", minval=0.5, maxval=10.0, step=0.5, group=grpRisk)
+consecLossLimit  = input.int(3, "Consecutive Loss Limit (cooldown)", minval=1, maxval=10, group=grpRisk)
+maxLeverage      = input.float(10.0, "Max Leverage", minval=1.0, maxval=125.0, step=1.0, group=grpRisk)
+atrStopMult      = input.float(2.0, "ATR Stop Loss Multiplier", minval=0.5, step=0.1, group=grpRisk)
+atrTpMult        = input.float(3.0, "ATR Take Profit Multiplier", minval=0.5, step=0.1, group=grpRisk)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+grpSession = "7. Session Filter"
+useSessionFilter = input.bool(false, "Enable Session Filter", group=grpSession, tooltip="OFF by default for 24/7 crypto. Enable for forex/equities.")
+londonSession    = input.session("0800-1700", "London Session", group=grpSession)
+nySession        = input.session("1400-2300", "NY Session", group=grpSession)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+grpVis = "8. Visuals"
+showDashboard    = input.bool(true, "Show Dashboard", group=grpVis)
+showRegimeBg     = input.bool(true, "Show Regime Background", group=grpVis)
+showBandFill     = input.bool(true, "Show Price-Band Fill", group=grpVis)
+showKillSwitch   = input.bool(true, "Show Kill Switch Warnings", group=grpVis)
+show3DOrbs       = input.bool(true, "Show 3D Rejection Orbs (Sweeps)", group=grpVis)
+colorCandles     = input.bool(true, "Gradient Candle Coloring (ML)", group=grpVis)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS — MACHINE LEARNING (KNN)
+// ══════════════════════════════════════════════════════════════════════════════
+grpML = "9. Machine Learning (KNN)"
+useML            = input.bool(true, "Enable ML Factor", group=grpML)
+neighborsK       = input.int(10, "K-Neighbors", minval=1, maxval=50, group=grpML)
+windowSize       = input.int(500, "Search Window", minval=100, maxval=2000, group=grpML)
+mlBuffer         = input.float(5.0, "ML Confidence Buffer (%)", minval=0.0, step=0.5, group=grpML)
+vibrancy         = input.float(1.5, "Candle Vibrancy", minval=1.0, step=0.1, group=grpML)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// REGIME ENGINE — STATE MACHINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Volatility percentile (institutional standard: percentile rank, not ratio)
+float currentATR = ta.atr(regimeAtrLen)
+float rawAtrPercentile = ta.percentrank(currentATR, regimeAtrLookback)
+float atrPercentile = bar_index >= regimeAtrLookback ? rawAtrPercentile / 100.0 : 0.5
+
+// ADX + DI
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+// Volume percentile
+float rawVolPercentile = ta.percentrank(volume, 50)
+float volPercentile = bar_index >= 50 ? rawVolPercentile / 100.0 : 0.5
+
+// Regime Classification (4-state machine)
+// TRENDING: ADX high + volatility moderate
+// EXPANDING: volatility high (liquidation cascade / news)
+// COMPRESSING: volatility low + ADX low (before breakout)
+// CHOP: everything else
+string regime = "CHOP"
+if adxVal > adxTrendThresh and atrPercentile >= 0.3 and atrPercentile <= 0.8
+    regime := "TRENDING"
+else if atrPercentile > 0.8
+    regime := "EXPANDING"
+else if atrPercentile < 0.2 and adxVal < adxTrendThresh
+    regime := "COMPRESSING"
+else
+    regime := "CHOP"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADAPTIVE SUPERTREND CORE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Dynamic multiplier based on regime
+float regimeMult = regime == "TRENDING" ? 1.0 : regime == "EXPANDING" ? 1.8 : regime == "COMPRESSING" ? 0.6 : 1.2
+float adaptiveMult = math.max(minMult, math.min(maxMult, baseMult * regimeMult))
+
+// Dynamic ATR period (precalculated for simple int length)
+int periodExp  = math.max(5, math.min(30, int(math.round(atrPeriod * 0.5))))
+int periodComp = math.max(5, math.min(30, int(math.round(atrPeriod * 1.5))))
+int periodNorm = math.max(5, math.min(30, atrPeriod))
+
+float atrExp  = ta.atr(periodExp)
+float atrComp = ta.atr(periodComp)
+float atrNorm = ta.atr(periodNorm)
+
+float adaptiveATR = regime == "EXPANDING" ? atrExp : regime == "COMPRESSING" ? atrComp : atrNorm
+
+// Supertrend Core — standard band-tracking logic
+float src = hl2
+float upperBand = src + adaptiveATR * adaptiveMult
+float lowerBand = src - adaptiveATR * adaptiveMult
+
+var float finalUpperBand = na
+var float finalLowerBand = na
+var int   trend = 1
+
+// Ratchet bands: lower band can only rise, upper band can only fall
+float prevLower = nz(finalLowerBand[1], lowerBand)
+float prevUpper = nz(finalUpperBand[1], upperBand)
+finalLowerBand := lowerBand > prevLower ? lowerBand : prevLower
+finalUpperBand := upperBand < prevUpper ? upperBand : prevUpper
+
+// Trend flip detection
+float flipSrcHigh = useWickMode ? high : close
+float flipSrcLow  = useWickMode ? low  : close
+
+if trend[1] == 1
+    if flipSrcLow < finalLowerBand
+        trend := -1
+        finalUpperBand := upperBand  // reset upper band on flip
+    else
+        trend := 1
+else
+    if flipSrcHigh > finalUpperBand
+        trend := 1
+        finalLowerBand := lowerBand  // reset lower band on flip
+    else
+        trend := -1
+
+float supertrend = trend == 1 ? finalLowerBand : finalUpperBand
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HTF HIERARCHY — NON-REPAINT
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Non-repaint HTF fetch: shift by 1 bar on real-time so the current (unclosed) HTF
+// candle is never used. On historical bars offset stays 0 — no data loss.
+// barstate.isconfirmed alone is wrong: it is the chart-bar's confirm, not the HTF's.
+int htfOffset = requireHTFConfirm and barstate.isrealtime ? 1 : 0
+[htfClose, htfEma, htfATR] = request.security(syminfo.tickerid, htfTimeframe,
+     [close[htfOffset], ta.ema(close, htfEmaLen)[htfOffset], ta.atr(htfAtrLen)[htfOffset]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+bool htfBull = not na(htfEma) and htfClose > htfEma
+bool htfBear = not na(htfEma) and htfClose < htfEma
+bool htfAligned = (trend == 1 and htfBull) or (trend == -1 and htfBear)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY & STRUCTURE ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Equal highs/lows sweep detection (rolling, not pivot-dependent)
+float highestRecent = ta.highest(high, sweepLookback)
+float lowestRecent  = ta.lowest(low, sweepLookback)
+float prevHighest   = ta.highest(high[1], sweepLookback)
+float prevLowest    = ta.lowest(low[1], sweepLookback)
+
+// Sweep: price takes out recent extreme but closes back inside
+bool bullishSweep = low <= prevLowest and close > prevLowest and (prevLowest - low) > adaptiveATR * sweepThreshold
+bool bearishSweep = high >= prevHighest and close < prevHighest and (high - prevHighest) > adaptiveATR * sweepThreshold
+
+// Structure bias (non-repaint: uses confirmed closes only)
+string structBias = "NEUTRAL"
+if close > highestRecent[1]
+    structBias := "BULLISH"
+else if close < lowestRecent[1]
+    structBias := "BEARISH"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION GATE — PULLBACK-BASED ENTRIES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Trend flip detection (confirmed on close)
+bool newTrendUp   = trend == 1 and trend[1] == -1
+bool newTrendDown = trend == -1 and trend[1] == 1
+bool anyFlip      = newTrendUp or newTrendDown
+
+// Pullback tracking: after a flip, track if price returns to band
+var bool pullbackActive = false
+var int  pullbackBar    = na
+var int  lastSignalBar  = -9999
+var int  consecLosses   = 0
+var bool inTrade        = false
+var int  tradeSide      = 0  // 1 = long, -1 = short
+
+if anyFlip
+    pullbackActive := true
+    pullbackBar := bar_index
+
+// Pullback distance check
+float distToBand = math.abs(close - supertrend)
+bool inPullbackZone = pullbackActive and (bar_index - pullbackBar <= 10) and (distToBand <= adaptiveATR * pullbackMaxDist)
+
+// Volume confirmation
+bool volConfirm = not requireVolConfirm or (volPercentile >= volPercentileTh / 100.0)
+
+// Session filter
+bool inLondon = not na(time(timeframe.period, londonSession))
+bool inNY     = not na(time(timeframe.period, nySession))
+bool inSession = not useSessionFilter or inLondon or inNY
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MACHINE LEARNING ENGINE (KNN)
+// ══════════════════════════════════════════════════════════════════════════════
+float f1 = ta.rsi(close, 14)
+float f2 = (ta.atr(14) / close) * 100
+
+var float mlProb = 50.0
+if useML and bar_index > windowSize
+    float bullVotes = 0.0
+    float bearVotes = 0.0
+    float[] dists = array.new_float(0)
+    for i = 1 to windowSize
+        float d = math.sqrt(math.pow(f1 - f1[i], 2) + math.pow(f2 - f2[i], 2))
+        array.push(dists, d)
+    float[] sortedDists = array.copy(dists)
+    array.sort(sortedDists)
+    float threshold = array.get(sortedDists, math.min(neighborsK - 1, array.size(sortedDists) - 1))
+    for i = 0 to array.size(dists) - 1
+        if array.get(dists, i) <= threshold
+            if trend[i+1] > 0
+                bullVotes += 1
+            else
+                bearVotes += 1
+    mlProb := (bullVotes / math.max(1, bullVotes + bearVotes)) * 100
+
+float smoothedProb = ta.ema(mlProb, 20)
+var bool mlBullish = false
+if smoothedProb > 50 + mlBuffer
+    mlBullish := true
+else if smoothedProb < 50 - mlBuffer
+    mlBullish := false
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAL SCORING — INDEPENDENT FACTORS (NOT CORRELATED)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Factor 1: Regime Quality (0-15) — TRENDING highest, EXPANDING penalized
+int scoreRegime = regime == "TRENDING" ? 15 : regime == "COMPRESSING" ? 10 : regime == "EXPANDING" ? 5 : 0
+
+// Factor 2: HTF Confluence (0-20) — independent of ATR
+// Aligned full credit; neutral (no HTF bias either way) partial; opposed zero.
+int scoreHTF = htfAligned ? 20 : (htfBull or htfBear) ? 0 : 10
+
+// Factor 3: Structure Alignment (0-15) — independent of volatility
+int scoreStruct = 0
+if trend == 1
+    scoreStruct := structBias == "BULLISH" ? 15 : structBias == "NEUTRAL" ? 5 : 0
+else
+    scoreStruct := structBias == "BEARISH" ? 15 : structBias == "NEUTRAL" ? 5 : 0
+
+// Factor 4: Liquidity Sweep (0-15) — independent confirmation
+int scoreSweep = (trend == 1 and bullishSweep) or (trend == -1 and bearishSweep) ? 15 : 0
+
+// Factor 5: Volume Conviction (0-15) — independent of price action
+int scoreVol = volPercentile >= 0.9 ? 15 : volPercentile >= 0.7 ? 10 : volPercentile >= 0.5 ? 5 : 0
+
+// Factor 6: Machine Learning Confluence (0-20)
+int scoreML = 0
+if useML
+    scoreML := (trend == 1 and mlBullish) or (trend == -1 and not mlBullish) ? 20 : 0
+
+// Total Score (0-100)
+int signalScore = scoreRegime + scoreHTF + scoreStruct + scoreSweep + scoreVol + scoreML
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KILL SWITCHES & RISK ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Consecutive loss tracking (simulated) — only on trend flips, not every bar
+if anyFlip and inTrade
+    // Flip against the trade direction = loss
+    if (trend == 1 and tradeSide == -1) or (trend == -1 and tradeSide == 1)
+        consecLosses += 1
+    else
+        consecLosses := 0
+    inTrade := false
+
+bool killSwitchActive = consecLosses >= consecLossLimit
+bool volatilityKill   = atrPercentile > 0.97 and regime == "EXPANDING"  // extreme ATR + expanding regime
+bool chopBlock        = blockChop and regime == "CHOP"
+
+// Position sizing (dynamic based on ATR)
+float stopDistance = adaptiveATR * atrStopMult
+float tpDistance   = adaptiveATR * atrTpMult
+float riskPerUnit  = stopDistance / close
+float positionSize = riskPerUnit > 0 ? math.min(accountRiskPct / 100.0 / riskPerUnit, maxLeverage) : 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FINAL SIGNAL GATE
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool entryCondition = false
+string entrySide    = ""
+
+// Common gate — barstate.isconfirmed makes the signal fire only on the chart bar's
+// close, matching the "non-repaint" claim. Do NOT reset consecLosses here: that
+// happened on the last winning flip; wiping it on entry would defeat the kill switch.
+bool baseGate = inPullbackZone and not inTrade and not killSwitchActive and not volatilityKill and not chopBlock and volConfirm and inSession and signalScore >= minSignalScore and (bar_index - lastSignalBar >= cooldownBars) and barstate.isconfirmed
+
+if trend == 1 and baseGate
+    entryCondition := true
+    entrySide := "LONG"
+    inTrade := true
+    tradeSide := 1
+    lastSignalBar := bar_index
+
+if trend == -1 and baseGate
+    entryCondition := true
+    entrySide := "SHORT"
+    inTrade := true
+    tradeSide := -1
+    lastSignalBar := bar_index
+
+// Reset pullback tracking after entry or timeout
+if entryCondition or (pullbackActive and bar_index - pullbackBar > 10)
+    pullbackActive := false
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Regime background — very subtle tints
+color bgColor = na
+if showRegimeBg
+    bgColor := regime == "EXPANDING" ? color.new(color.orange, 96) :
+               regime == "COMPRESSING" ? color.new(color.blue, 96) :
+               regime == "TRENDING" and trend == 1 ? color.new(#089981, 97) :
+               regime == "TRENDING" and trend == -1 ? color.new(#f23645, 97) :
+               na
+bgcolor(bgColor, title="Regime Background")
+
+// Supertrend line
+color lineColor = trend == 1 ? #089981 : #f23645
+plot(supertrend, "Adaptive Supertrend", lineColor, linewidth=2)
+
+// Band fill
+pST = plot(supertrend, display=display.none)
+pClose = plot(close, display=display.none)
+fill(pST, pClose, showBandFill ? (trend == 1 ? color.new(#089981, 92) : color.new(#f23645, 92)) : na, title="Trend Fill")
+
+// Entry signals
+plotshape(entryCondition and entrySide == "LONG", "Long Entry", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small, text="L", textcolor=color.white)
+plotshape(entryCondition and entrySide == "SHORT", "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S", textcolor=color.white)
+
+// Structure points & 3D Orbs
+// 3D Orb Helper
+formatDynamicVolume(float vol) =>
+    vol >= 1000000000 ? str.format("{0,number,#.##}B", vol / 1000000000) :
+     vol >= 1000000 ? str.format("{0,number,#.##}M", vol / 1000000) :
+     vol >= 1000 ? str.format("{0,number,#.#}K", vol / 1000) :
+     str.tostring(vol, "#")
+
+render3DOrbWithLabel(int barIdx, float yCenter, string txt, color themeColor, float offset, bool isBull) =>
+    label.new(barIdx, yCenter, style = label.style_circle, color = color.new(color.black, 80), size = size.large, yloc = yloc.price)
+    label.new(barIdx, yCenter, style = label.style_circle, color = color.new(themeColor, 70), size = size.normal, yloc = yloc.price)
+    label.new(barIdx, yCenter, style = label.style_circle, color = color.new(color.white, 85), size = size.small, yloc = yloc.price)
+    float labelY = isBull ? yCenter - (offset * 4.0) : yCenter + (offset * 4.0)
+    label.new(barIdx, labelY, text = txt, style = isBull ? label.style_label_up : label.style_label_down, color = color.new(color.black, 40), textcolor = color.white, size = size.small, yloc = yloc.price)
+
+plotshape(showStructure and not show3DOrbs and bullishSweep, "Bullish Sweep", shape.diamond, location.belowbar, color.new(color.aqua, 0), size=size.tiny, text="SW", offset=-1)
+plotshape(showStructure and not show3DOrbs and bearishSweep, "Bearish Sweep", shape.diamond, location.abovebar, color.new(color.purple, 0), size=size.tiny, text="SW", offset=-1)
+
+float stemOffset = adaptiveATR * 0.5
+if show3DOrbs and bullishSweep
+    line.new(bar_index, low, bar_index, low - stemOffset, color = color.new(#089981, 60), style = line.style_dashed)
+    render3DOrbWithLabel(bar_index, low - stemOffset, formatDynamicVolume(volume), #089981, adaptiveATR * 0.1, true)
+
+if show3DOrbs and bearishSweep
+    line.new(bar_index, high, bar_index, high + stemOffset, color = color.new(#f23645, 60), style = line.style_dashed)
+    render3DOrbWithLabel(bar_index, high + stemOffset, formatDynamicVolume(volume), #f23645, adaptiveATR * 0.1, false)
+
+// Gradient Candles
+float intensity    = mlBullish ? (smoothedProb - 50) * 2 : (50 - smoothedProb) * 2
+float glowPower    = math.pow(math.max(0, intensity) / 100, vibrancy) * 100
+color candleBull = color.from_gradient(glowPower, 0, 100, color.new(#089981, 85), color.new(#089981, 20))
+color candleBear = color.from_gradient(glowPower, 0, 100, color.new(#f23645, 85), color.new(#f23645, 20))
+barcolor(colorCandles and useML ? (mlBullish ? candleBull : candleBear) : na, title = "Gradient Candles")
+
+// Kill switch warnings
+// Kill switch — only show on state change to avoid spam
+bool killJustActivated = killSwitchActive and not killSwitchActive[1]
+bool volKillJustActivated = volatilityKill and not volatilityKill[1]
+plotshape(showKillSwitch and killJustActivated, "Kill Switch", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="KILL", textcolor=color.yellow)
+plotshape(showKillSwitch and volKillJustActivated, "Volatility Kill", shape.xcross, location.abovebar, color.new(color.orange, 0), size=size.tiny, text="VOL", textcolor=color.orange)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD — OPTIMIZED (update only on last bar)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 9, color.new(#0b0e14, 15), frame_width=1, frame_color=color.new(#2a2e39, 50), border_width=0)
+
+if showDashboard and barstate.islast
+    color labelClr = color.new(#787b86, 0)
+
+    table.cell(dash, 0, 0, "REGIME", text_color=labelClr, text_size=size.small)
+    color regimeColor = regime == "TRENDING" ? #089981 : regime == "EXPANDING" ? color.orange : regime == "COMPRESSING" ? #2962ff : #787b86
+    table.cell(dash, 1, 0, regime, text_color=regimeColor, text_size=size.small)
+
+    table.cell(dash, 0, 1, "ATR %ILE", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(atrPercentile * 100, "#.") + "%", text_color=atrPercentile > 0.8 ? color.orange : atrPercentile < 0.2 ? #2962ff : color.white, text_size=size.small)
+
+    table.cell(dash, 0, 2, "ADX", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(adxVal, "#.#"), text_color=adxVal > adxTrendThresh ? #089981 : #787b86, text_size=size.small)
+
+    table.cell(dash, 0, 3, "HTF", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 3, htfBull ? "BULL" : htfBear ? "BEAR" : "MIX", text_color=htfBull ? #089981 : htfBear ? #f23645 : #787b86, text_size=size.small)
+
+    table.cell(dash, 0, 4, "SCORE", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(signalScore), text_color=signalScore >= minSignalScore ? #089981 : signalScore >= 50 ? color.yellow : #f23645, text_size=size.small)
+
+    table.cell(dash, 0, 5, "POS", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 5, inTrade ? (trend == 1 ? "LONG" : "SHORT") : "FLAT", text_color=inTrade ? color.white : #787b86, text_size=size.small)
+
+    table.cell(dash, 0, 6, "SIZE", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(positionSize, "#.##") + "x", text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 7, "STATUS", text_color=labelClr, text_size=size.small)
+    string killText = killSwitchActive ? "KILL" : volatilityKill ? "VOL" : chopBlock ? "CHOP" : "OK"
+    table.cell(dash, 1, 7, killText, text_color=killSwitchActive or volatilityKill or chopBlock ? #f23645 : #089981, text_size=size.small)
+
+    table.cell(dash, 0, 8, "ML CONF", text_color=labelClr, text_size=size.small)
+    table.cell(dash, 1, 8, useML ? (str.tostring(smoothedProb, "#.#") + "%") : "OFF", text_color=useML ? (mlBullish ? #089981 : #f23645) : #787b86, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(entryCondition and entrySide == "LONG", "AST Inst: Long Entry", "LONG {{ticker}} @ {{close}} | See Dashboard for details")
+alertcondition(entryCondition and entrySide == "SHORT", "AST Inst: Short Entry", "SHORT {{ticker}} @ {{close}} | See Dashboard for details")
+alertcondition(regime == "EXPANDING" and regime[1] != "EXPANDING", "AST Inst: Volatility Expansion", "EXPANDING regime on {{ticker}} — reduce size or pause")
+alertcondition(regime == "COMPRESSING" and regime[1] != "COMPRESSING", "AST Inst: Compression Detected", "COMPRESSION on {{ticker}} — watch for breakout")
+alertcondition(killSwitchActive, "AST Inst: Kill Switch", "Kill switch active on {{ticker}} — cooldown triggered")
