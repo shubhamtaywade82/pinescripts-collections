@@ -1,0 +1,501 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlphaTrend Pro - Multi-Layer FCFS Confirmation Strategy for Crypto Futures
+// Built using TradingView/ta library v12
+
+//@version=6
+strategy("AlphaTrend Pro [FCFS Multi-Confirmation + Trailing SL/TP]",
+     shorttitle="ATP",
+     overlay=true,
+     calc_on_every_tick=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     max_lines_count=500,
+     max_boxes_count=500,
+     max_labels_count=500)
+
+// =============================================================================
+// IMPORTS
+// =============================================================================
+import TradingView/ta/12 as ATP
+
+// =============================================================================
+// STRATEGY OVERVIEW
+// =============================================================================
+// AlphaTrend Pro uses a 3-Layer FCFS (First-Come-First-Served) confirmation
+// system designed for Crypto Futures (Intraday + Swing adaptable):
+//
+// LAYER 1 (TREND)   - supertrend2 + kama + ichimoku cloud    [FCFS Priority 1]
+// LAYER 2 (MOMENTUM) - macd2 + stochRsi + pzo                  [FCFS Priority 2]
+// LAYER 3 (VOLUME)   - relativeVolume + vzo                   [FCFS Priority 3]
+// EXIT LAYER         - vStop2 trailing stop + chandelier2     [Risk Management]
+//
+// FCFS Logic: First layer to fire locks trade direction. Subsequent layers
+// must confirm within 'confirmationLookback' bars. All layers must align
+// within the lookback window for a valid signal.
+//
+// TRAILING STOP/TP: Uses vStop2 (volatility-based adaptive trailing) as
+// primary exit, with chandelier2 as secondary hard stop. Captures full trends
+// while protecting against reversals.
+// =============================================================================
+
+// =============================================================================
+// INPUTS - Strategy Mode
+// =============================================================================
+groupMode = "═════════════════════  STRATEGY MODE  ═════════════════════"
+strategyMode    = input.string("Adaptive", "Strategy Mode", options=["Intraday", "Swing", "Adaptive"], group=groupMode,
+                  tooltip="Intraday=aggressive(15m-1H), Swing=conservative(4H-D), Adaptive=auto-detect from chart timeframe")
+useTrendLayer   = input.bool(true, "Use TREND Layer (Layer 1)", group=groupMode)
+useMomentumLayer= input.bool(true, "Use MOMENTUM Layer (Layer 2)", group=groupMode)
+useVolumeLayer  = input.bool(true, "Use VOLUME Layer (Layer 3)", group=groupMode)
+useFCFSQueue    = input.bool(true, "Use FCFS Confirmation Queue", group=groupMode,
+                  tooltip="If true, first confirming layer locks direction; others must confirm within lookback")
+
+// =============================================================================
+// INPUTS - Layer 1: TREND (FCFS Priority 1)
+// =============================================================================
+groupTrend = "══════ LAYER 1: TREND (Supertrend + KAMA + Ichimoku) ══════"
+stFactor     = input.float(3.0, "Supertrend ATR Factor", minval=0.1, step=0.1, group=groupTrend,
+               tooltip="Multiplier for ATR bands. Higher = wider bands, fewer signals")
+stAtrLen     = input.int(10, "Supertrend ATR Length", minval=1, group=groupTrend)
+stUseWicks   = input.bool(true, "Supertrend Use Wicks", group=groupTrend,
+               tooltip="Use high/low for reversal detection vs close only")
+kamaLength   = input.int(10, "KAMA ER Length", minval=2, group=groupTrend)
+kamaFastLen  = input.float(2.0, "KAMA Fast Length", minval=1, group=groupTrend)
+kamaSlowLen  = input.float(30.0, "KAMA Slow Length", minval=1, group=groupTrend)
+ichiConv     = input.int(9, "Ichimoku Conversion (Tenkan)", minval=1, group=groupTrend)
+ichiBase     = input.int(26, "Ichimoku Base (Kijun)", minval=1, group=groupTrend)
+ichiSpanB    = input.int(52, "Ichimoku Span B", minval=1, group=groupTrend)
+trendConfirm = input.int(1, "Trend Bars to Confirm", minval=1, maxval=5, group=groupTrend,
+               tooltip="Consecutive bars required for trend confirmation")
+
+// =============================================================================
+// INPUTS - Layer 2: MOMENTUM (FCFS Priority 2)
+// =============================================================================
+groupMom = "═════════ LAYER 2: MOMENTUM (MACD2 + StochRSI + PZO) ═════════"
+macdFast     = input.float(12, "MACD Fast Length", minval=1, group=groupMom)
+macdSlow     = input.float(26, "MACD Slow Length", minval=1, group=groupMom)
+macdSignal   = input.float(9, "MACD Signal Length", minval=1, group=groupMom)
+rsiLen       = input.int(14, "StochRSI RSI Length", minval=1, group=groupMom)
+stochK       = input.int(14, "StochRSI %K Length", minval=1, group=groupMom)
+stochSmoothK = input.int(3, "StochRSI Smooth %K", minval=1, group=groupMom)
+stochD       = input.int(3, "StochRSI %D Length", minval=1, group=groupMom)
+stochOversold= input.float(20, "StochRSI Oversold", minval=0, maxval=100, group=groupMom)
+stochOverbought=input.float(80, "StochRSI Overbought", minval=0, maxval=100, group=groupMom)
+pzoLength    = input.int(14, "PZO Length", minval=1, group=groupMom)
+momConfirm   = input.int(1, "Momentum Bars to Confirm", minval=1, maxval=3, group=groupMom)
+
+// =============================================================================
+// INPUTS - Layer 3: VOLUME (FCFS Priority 3)
+// =============================================================================
+groupVol = "══════════ LAYER 3: VOLUME (RelVolume + VZO) ══════════"
+relVolLen      = input.int(20, "Relative Volume Lookback", minval=5, group=groupVol)
+relVolAnchor   = input.string("1D", "RelVol Anchor Timeframe", group=groupVol)
+relVolCum      = input.bool(true, "RelVol Cumulative", group=groupVol)
+relVolRealtime = input.bool(true, "RelVol Adjust Realtime", group=groupVol)
+vzoLength      = input.int(14, "VZO Length", minval=1, group=groupVol)
+volSpikeThresh = input.float(1.5, "Volume Spike Threshold", minval=1.0, step=0.1, group=groupVol,
+                 tooltip="RelVol ratio above this = volume spike confirmation")
+volConfirm     = input.int(1, "Volume Bars to Confirm", minval=1, maxval=3, group=groupVol)
+
+// =============================================================================
+// INPUTS - FCFS QUEUE SETTINGS
+// =============================================================================
+groupFCFS = "═══════════════════ FCFS QUEUE SETTINGS ═══════════════════"
+confirmationLookback = input.int(3, "Confirmation Window (bars)", minval=1, maxval=10, group=groupFCFS,
+                     tooltip="Max bars for subsequent layers to confirm after first layer fires")
+minLayersRequired    = input.int(2, "Min Layers to Confirm Trade", minval=1, maxval=3, group=groupFCFS,
+                     tooltip="Minimum number of layers that must agree for valid signal")
+
+// =============================================================================
+// INPUTS - TRAILING STOP / TAKE PROFIT (vStop2 + Chandelier2)
+// =============================================================================
+groupExit = "══════════ TRAILING STOP/TP (vStop2 + Chandelier2) ══════════"
+useTrailingStop = input.bool(true, "Use Trailing Stop (vStop2)", group=groupExit)
+vstopAtrLen     = input.float(10, "vStop ATR Length", minval=1, group=groupExit)
+vstopFactor     = input.float(2.5, "vStop ATR Factor", minval=0.5, step=0.1, group=groupExit,
+                  tooltip="Higher = looser trail, stays in trends longer")
+useChandelier   = input.bool(true, "Use Chandelier Exit (Backup)", group=groupExit)
+chandelierLen   = input.int(22, "Chandelier Lookback", minval=5, group=groupExit)
+chandelierAtrLen= input.float(22, "Chandelier ATR Length", minval=1, group=groupExit)
+chandelierMult  = input.float(3.0, "Chandelier ATR Multiplier", minval=0.5, step=0.1, group=groupExit)
+useFixedTP      = input.bool(false, "Use Fixed Take Profit %", group=groupExit)
+fixedTPPercent  = input.float(5.0, "Fixed TP %", minval=0.1, step=0.1, group=groupExit)
+useFixedSL      = input.bool(false, "Use Fixed Stop Loss %", group=groupExit)
+fixedSLPercent  = input.float(2.0, "Fixed SL %", minval=0.1, step=0.1, group=groupExit)
+trailArmPercent = input.float(0.5, "Trail Arm Threshold %", minval=0.0, step=0.1, group=groupExit,
+                  tooltip="Price must move this % in favor before trailing activates. 0 = always active")
+
+// =============================================================================
+// INPUTS - RISK MANAGEMENT
+// =============================================================================
+groupRisk = "═══════════════════ RISK MANAGEMENT ═══════════════════"
+riskPerTrade   = input.float(2.0, "Risk Per Trade %", minval=0.1, maxval=100, step=0.1, group=groupRisk,
+                 tooltip="% of equity to risk per trade. Position size auto-calculated via ATR")
+maxPosSize     = input.float(50.0, "Max Position Size % Equity", minval=1, maxval=100, group=groupRisk)
+useATRPositionSizing = input.bool(true, "Use ATR Position Sizing", group=groupRisk,
+                 tooltip="Position size = Risk% / (ATR * multiplier). Smaller stops = larger size")
+atrPosMult     = input.float(2.0, "ATR Position Size Multiplier", minval=0.5, step=0.1, group=groupRisk)
+maxSpreadPct   = input.float(0.5, "Max Spread % to Trade", minval=0.01, step=0.01, group=groupRisk,
+                 tooltip="Skip trade if spread > this %")
+cooldownBars   = input.int(5, "Trade Cooldown (bars)", minval=0, group=groupRisk,
+                 tooltip="Bars to wait between trades")
+
+// =============================================================================
+// INPUTS - DISPLAY
+// =============================================================================
+groupDisp = "══════════════════════ DISPLAY ══════════════════════"
+showSupertrend   = input.bool(true, "Show Supertrend", group=groupDisp)
+showKAMA         = input.bool(true, "Show KAMA Line", group=groupDisp)
+showIchimoku     = input.bool(false, "Show Ichimoku Cloud", group=groupDisp)
+showVStop        = input.bool(true, "Show Trailing Stop", group=groupDisp)
+showChandelier   = input.bool(true, "Show Chandelier Exit", group=groupDisp)
+showSignals      = input.bool(true, "Show Signal Labels", group=groupDisp)
+showBackground   = input.bool(true, "Show Trend Background", group=groupDisp)
+showDashboard    = input.bool(true, "Show Signal Dashboard", group=groupDisp)
+
+// =============================================================================
+// ADAPTIVE MODE: Auto-configure based on chart timeframe
+// =============================================================================
+isIntradayTF = timeframe.isintraday
+isSwingTF    = not timeframe.isintraday
+
+// Adaptive parameter adjustment
+adaptedStFactor    = strategyMode == "Intraday" ? stFactor * 0.8 : strategyMode == "Swing" ? stFactor * 1.3 : stFactor
+adaptedVstopFactor = strategyMode == "Intraday" ? vstopFactor * 0.7 : strategyMode == "Swing" ? vstopFactor * 1.4 : vstopFactor
+adaptedTrailArm    = strategyMode == "Intraday" ? trailArmPercent * 0.5 : strategyMode == "Swing" ? trailArmPercent * 2.0 : trailArmPercent
+
+// =============================================================================
+// LAYER 1: TREND CALCULATIONS
+// =============================================================================
+// Supertrend with series float support (adapted factor)
+[stLine, stDir] = ATP.supertrend2(adaptedStFactor, float(stAtrLen), stUseWicks)
+stBullish = stDir == -1  // Supertrend bullish when direction is -1 (below price)
+stBearish = stDir == 1   // Supertrend bearish when direction is 1 (above price)
+
+// KAMA - adaptive moving average
+kamaLine = ATP.kama(close, kamaLength, kamaFastLen, kamaSlowLen)
+kamaBullish = close > kamaLine
+kamaBearish = close < kamaLine
+
+// Ichimoku Cloud
+[tenkan, kijun, senkouA, senkouB, chikou] = ATP.ichimoku(ichiConv, ichiBase, ichiSpanB)
+ichiBullish = close > math.max(senkouA, senkouB)  // Price above cloud
+ichiBearish = close < math.min(senkouA, senkouB)  // Price below cloud
+cloudGreen  = senkouA > senkouB  // Bullish cloud
+
+// Trend Layer Composite Signal
+trendLong  = useTrendLayer ? (stBullish and kamaBullish and ichiBullish) : true
+trendShort = useTrendLayer ? (stBearish and kamaBearish and ichiBearish) : true
+trendLong  := useTrendLayer and trendConfirm > 1 ? trendLong and trendLong[1] : trendLong
+trendShort := useTrendLayer and trendConfirm > 1 ? trendShort and trendShort[1] : trendShort
+
+// =============================================================================
+// LAYER 2: MOMENTUM CALCULATIONS
+// =============================================================================
+// MACD2 with series float support
+[macdLine, macdSig, macdHist] = ATP.macd2(close, macdFast, macdSlow, macdSignal)
+macdBullish = macdLine > macdSig and macdHist > 0
+macdBearish = macdLine < macdSig and macdHist < 0
+macdBullCross = ta.crossover(macdLine, macdSig)
+macdBearCross = ta.crossunder(macdLine, macdSig)
+
+// Stochastic RSI
+[srsiK, srsiD] = ATP.stochRsi(rsiLen, stochK, stochSmoothK, stochD, close)
+srsiOversold   = srsiK < stochOversold
+srsiOverbought = srsiK > stochOverbought
+srsiBullish    = srsiK > srsiD and srsiK > stochOversold  // %K above %D and not oversold
+srsiBearish    = srsiK < srsiD and srsiK < stochOverbought // %K below %D and not overbought
+srsiExitLong   = srsiK > stochOverbought and srsiK < srsiD  // Leaving overbought
+srsiExitShort  = srsiK < stochOversold and srsiK > srsiD    // Leaving oversold
+
+// PZO - Price Zone Oscillator
+pzoVal = ATP.pzo(pzoLength)
+pzoBullish = pzoVal > 0
+pzoBearish = pzoVal < 0
+
+// Momentum Layer Composite Signal
+momLong  = useMomentumLayer ? (macdBullish and srsiBullish and pzoBullish) : true
+momShort = useMomentumLayer ? (macdBearish and srsiBearish and pzoBearish) : true
+momLong  := useMomentumLayer and momConfirm > 1 ? momLong and momLong[1] : momLong
+momShort := useMomentumLayer and momConfirm > 1 ? momShort and momShort[1] : momShort
+
+// Early momentum signals (for FCFS queue)
+momEarlyLong  = macdBullCross or (srsiOversold and srsiK > srsiD)
+momEarlyShort = macdBearCross or (srsiOverbought and srsiK < srsiD)
+
+// =============================================================================
+// LAYER 3: VOLUME CALCULATIONS
+// =============================================================================
+// Relative Volume
+[currVol, avgVol, volRatio] = ATP.relativeVolume(relVolLen, relVolAnchor, relVolCum, relVolRealtime)
+volSpike = volRatio > volSpikeThresh
+
+// VZO - Volume Zone Oscillator
+vzoVal = ATP.vzo(vzoLength)
+vzoBullish = vzoVal > 0
+vzoBearish = vzoVal < 0
+vzoStrong  = math.abs(vzoVal) > 40  // Strong volume conviction
+
+// Volume Layer Composite Signal
+volLong  = useVolumeLayer ? (volSpike and vzoBullish) : true
+volShort = useVolumeLayer ? (volSpike and vzoBearish) : true
+volLong  := useVolumeLayer and volConfirm > 1 ? volLong and volLong[1] : volLong
+volShort := useVolumeLayer and volConfirm > 1 ? volShort and volShort[1] : volShort
+
+// Early volume signals
+volEarlyLong  = volSpike or vzoBullish
+volEarlyShort = volSpike or vzoBearish
+
+// =============================================================================
+// FCFS (First-Come-First-Served) CONFIRMATION QUEUE
+// =============================================================================
+var int fcfsLongTriggerBar  = na
+var int fcfsShortTriggerBar = na
+
+// Detect which layer fires first
+layer1FiresLong  = trendLong and not trendLong[1]
+layer1FiresShort = trendShort and not trendShort[1]
+layer2FiresLong  = momLong and not momLong[1]
+layer2FiresShort = momShort and not momShort[1]
+layer3FiresLong  = volLong and not volLong[1]
+layer3FiresShort = volShort and not volShort[1]
+
+// Record trigger bar on first fire
+if layer1FiresLong or layer2FiresLong or layer3FiresLong
+    fcfsLongTriggerBar := bar_index
+
+if layer1FiresShort or layer2FiresShort or layer3FiresShort
+    fcfsShortTriggerBar := bar_index
+
+// Check if all required layers confirm within lookback window
+barsSinceLongTrigger  = bar_index - fcfsLongTriggerBar
+barsSinceShortTrigger = bar_index - fcfsShortTriggerBar
+
+inLongWindow  = not na(fcfsLongTriggerBar) and barsSinceLongTrigger <= confirmationLookback
+inShortWindow = not na(fcfsShortTriggerBar) and barsSinceShortTrigger <= confirmationLookback
+
+// Count confirming layers
+longLayersConfirm  = (useTrendLayer and trendLong ? 1 : 0) + (useMomentumLayer and momLong ? 1 : 0) + (useVolumeLayer and volLong ? 1 : 0)
+shortLayersConfirm = (useTrendLayer and trendShort ? 1 : 0) + (useMomentumLayer and momShort ? 1 : 0) + (useVolumeLayer and volShort ? 1 : 0)
+
+// FCFS-validated signals
+fcfsLongValid  = useFCFSQueue ? (inLongWindow and longLayersConfirm >= minLayersRequired) : (longLayersConfirm >= minLayersRequired)
+fcfsShortValid = useFCFSQueue ? (inShortWindow and shortLayersConfirm >= minLayersRequired) : (shortLayersConfirm >= minLayersRequired)
+
+// Fresh signal (first bar of confirmation)
+longSignal  = fcfsLongValid and not fcfsLongValid[1]
+shortSignal = fcfsShortValid and not fcfsShortValid[1]
+
+// =============================================================================
+// EXIT LAYER: TRAILING STOP / TAKE PROFIT
+// =============================================================================
+// Primary: vStop2 - Volatility-based trailing stop with series float
+[vstopVal, vstopTrendUp] = ATP.vStop2(close, vstopAtrLen, adaptedVstopFactor)
+
+// Secondary: Chandelier Exit
+[chandelierLong, chandelierShort] = ATP.chandelier2(chandelierLen, chandelierAtrLen, chandelierMult)
+
+// Track highest/lowest price since entry for trailing activation
+var float entryPrice = na
+var float highestPrice = na
+var float lowestPrice = na
+var int   barsSinceEntry = 0
+
+if strategy.position_size != 0
+    barsSinceEntry += 1
+    if strategy.position_size > 0  // Long position
+        highestPrice := math.max(nz(highestPrice, close), high)
+        lowestPrice := na
+    else  // Short position
+        lowestPrice := math.min(nz(lowestPrice, close), low)
+        highestPrice := na
+else
+    barsSinceEntry := 0
+    highestPrice := na
+    lowestPrice := na
+    entryPrice := na
+
+// Record entry price on position open
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+    entryPrice := close
+if strategy.position_size < 0 and strategy.position_size[1] >= 0
+    entryPrice := close
+
+// Trailing stop activation check
+longTrailActive  = strategy.position_size > 0 and (trailArmPercent <= 0 or ((highestPrice - entryPrice) / entryPrice * 100) >= adaptedTrailArm)
+shortTrailActive = strategy.position_size < 0 and (trailArmPercent <= 0 or ((entryPrice - lowestPrice) / entryPrice * 100) >= adaptedTrailArm)
+
+// Exit conditions
+vstopLongExit   = useTrailingStop and strategy.position_size > 0 and not vstopTrendUp and longTrailActive
+vstopShortExit  = useTrailingStop and strategy.position_size < 0 and vstopTrendUp and shortTrailActive
+
+chandelierLongExit  = useChandelier and strategy.position_size > 0 and close < chandelierLong
+chandelierShortExit = useChandelier and strategy.position_size < 0 and close > chandelierShort
+
+// Fixed TP/SL
+fixedTPHitLong  = useFixedTP and strategy.position_size > 0 and close >= entryPrice * (1 + fixedTPPercent / 100)
+fixedTPHitShort = useFixedTP and strategy.position_size < 0 and close <= entryPrice * (1 - fixedTPPercent / 100)
+fixedSLHitLong  = useFixedSL and strategy.position_size > 0 and close <= entryPrice * (1 - fixedSLPercent / 100)
+fixedSLHitShort = useFixedSL and strategy.position_size < 0 and close >= entryPrice * (1 + fixedSLPercent / 100)
+
+// Combine exit signals
+exitLong  = vstopLongExit or chandelierLongExit or fixedTPHitLong or fixedSLHitLong
+exitShort = vstopShortExit or chandelierShortExit or fixedTPHitShort or fixedSLHitShort
+
+// =============================================================================
+// POSITION SIZING (ATR-Based Risk Management)
+// =============================================================================
+atrVal = ATP.atr2(float(10))
+dollarRisk = strategy.equity * riskPerTrade / 100
+stopDistance = atrVal * atrPosMult
+posSize = useATRPositionSizing and stopDistance > 0 ? math.min(dollarRisk / stopDistance / close * 100, maxPosSize) : math.min(10, maxPosSize)
+posSize := math.max(posSize, 0.1)  // Minimum position size
+
+// =============================================================================
+// COOLDOWN FILTER
+// =============================================================================
+var int lastTradeBar = na
+inCooldown = not na(lastTradeBar) and (bar_index - lastTradeBar) < cooldownBars
+
+// =============================================================================
+// TRADE EXECUTION
+// =============================================================================
+// Long Entry
+if longSignal and strategy.position_size <= 0 and not inCooldown and not na(posSize)
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Reverse to Long")
+    strategy.entry("Long", strategy.long, qty=posSize / 100 * strategy.equity / close)
+    lastTradeBar := bar_index
+
+// Short Entry
+if shortSignal and strategy.position_size >= 0 and not inCooldown and not na(posSize)
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Reverse to Short")
+    strategy.entry("Short", strategy.short, qty=posSize / 100 * strategy.equity / close)
+    lastTradeBar := bar_index
+
+// Long Exit
+if exitLong and strategy.position_size > 0
+    string exitReason = vstopLongExit ? "vStop Trail" : chandelierLongExit ? "Chandelier" : fixedTPHitLong ? "Fixed TP" : "Fixed SL"
+    strategy.close("Long", comment=exitReason)
+    lastTradeBar := bar_index
+
+// Short Exit
+if exitShort and strategy.position_size < 0
+    string exitReason = vstopShortExit ? "vStop Trail" : chandelierShortExit ? "Chandelier" : fixedTPHitShort ? "Fixed TP" : "Fixed SL"
+    strategy.close("Short", comment=exitReason)
+    lastTradeBar := bar_index
+
+// =============================================================================
+// VISUALIZATION - Price Action & Indicators
+// =============================================================================
+// Supertrend line coloring
+stColor = stBullish ? color.new(color.teal, 30) : color.new(color.red, 30)
+plot(showSupertrend ? stLine : na, "Supertrend", stColor, linewidth=2)
+
+// KAMA line
+plot(showKAMA ? kamaLine : na, "KAMA", color.new(color.orange, 20), linewidth=1)
+
+// Ichimoku Cloud
+ichiPlotA = plot(showIchimoku ? senkouA : na, "Senkou A", color.new(color.green, 50), display=display.pane)
+ichiPlotB = plot(showIchimoku ? senkouB : na, "Senkou B", color.new(color.red, 50), display=display.pane)
+fill(ichiPlotA, ichiPlotB, color=cloudGreen ? color.new(color.green, 90) : color.new(color.red, 90), title="Ichimoku Cloud")
+
+// Trailing Stop
+plot(showVStop ? vstopVal : na, "vStop Trail", color.new(color.purple, 20), linewidth=2, style=plot.style_linebr)
+
+// Chandelier Exit
+plot(showChandelier and strategy.position_size > 0 ? chandelierLong : na, "Chandelier Long", color.new(color.lime, 30), style=plot.style_circles, linewidth=2)
+plot(showChandelier and strategy.position_size < 0 ? chandelierShort : na, "Chandelier Short", color.new(color.maroon, 30), style=plot.style_circles, linewidth=2)
+
+// =============================================================================
+// SIGNAL LABELS
+// =============================================================================
+plotshape(showSignals and longSignal, "Long Signal", shape.triangleup, location.belowbar, color.new(color.teal, 0), size=size.normal, text="BUY", textcolor=color.white)
+plotshape(showSignals and shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal, text="SELL", textcolor=color.white)
+
+// =============================================================================
+// TREND BACKGROUND
+// =============================================================================
+bgColor = showBackground ? (fcfsLongValid ? color.new(color.teal, 92) : fcfsShortValid ? color.new(color.red, 92) : na) : na
+bgcolor(bgColor)
+
+// =============================================================================
+// SIGNAL DASHBOARD (Table)
+// =============================================================================
+if showDashboard
+    var table dash = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 30), frame_color=color.gray, frame_width=1)
+
+    // Header
+    table.cell(dash, 0, 0, "LAYER", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "STATUS", text_color=color.white, text_size=size.small, text_halign=text.align_center)
+
+    // Layer 1: Trend
+    color l1Color = trendLong ? color.green : trendShort ? color.red : color.gray
+    string l1Text  = trendLong ? "BULLISH" : trendShort ? "BEARISH" : "NEUTRAL"
+    table.cell(dash, 0, 1, "1. TREND", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 1, l1Text, text_color=l1Color, text_size=size.tiny, text_halign=text.align_center)
+
+    // Layer 2: Momentum
+    color l2Color = momLong ? color.green : momShort ? color.red : color.gray
+    string l2Text  = momLong ? "BULLISH" : momShort ? "BEARISH" : "NEUTRAL"
+    table.cell(dash, 0, 2, "2. MOMENTUM", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 2, l2Text, text_color=l2Color, text_size=size.tiny, text_halign=text.align_center)
+
+    // Layer 3: Volume
+    color l3Color = volLong ? color.green : volShort ? color.red : color.gray
+    string l3Text  = volLong ? "BULLISH" : volShort ? "BEARISH" : "NEUTRAL"
+    table.cell(dash, 0, 3, "3. VOLUME", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 3, l3Text, text_color=l3Color, text_size=size.tiny, text_halign=text.align_center)
+
+    // FCFS Signal
+    color sigColor = fcfsLongValid ? color.green : fcfsShortValid ? color.red : color.gray
+    string sigText  = fcfsLongValid ? "LONG" : fcfsShortValid ? "SHORT" : "WAIT"
+    table.cell(dash, 0, 4, "FCFS SIGNAL", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 4, sigText, text_color=sigColor, text_size=size.small, text_halign=text.align_center)
+
+    // Position info
+    string posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    color posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dash, 0, 5, "POSITION", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 5, posText, text_color=posColor, text_size=size.tiny, text_halign=text.align_center)
+
+    // PnL
+    color pnlColor = strategy.openprofit > 0 ? color.green : strategy.openprofit < 0 ? color.red : color.gray
+    table.cell(dash, 0, 6, "OPEN PnL", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 6, str.tostring(strategy.openprofit, format.mintick), text_color=pnlColor, text_size=size.tiny, text_halign=text.align_center)
+
+    // ATR / Stop Distance
+    table.cell(dash, 0, 7, "ATR", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 7, str.tostring(atrVal, "#.##"), text_color=color.orange, text_size=size.tiny, text_halign=text.align_center)
+
+    // Position Size
+    table.cell(dash, 0, 8, "POS SIZE %", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 8, str.tostring(posSize, "#.##"), text_color=color.aqua, text_size=size.tiny, text_halign=text.align_center)
+
+    // Mode
+    table.cell(dash, 0, 9, "MODE", text_color=color.silver, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dash, 1, 9, strategyMode, text_color=color.yellow, text_size=size.tiny, text_halign=text.align_center)
+
+// =============================================================================
+// ALERTS
+// =============================================================================
+if longSignal
+    alert("AlphaTrend - Long Signal: FCFS Long Signal: {{ticker}} at {{close}}. All layers aligned.", alert.freq_once_per_bar)
+if shortSignal
+    alert("AlphaTrend - Short Signal: FCFS Short Signal: {{ticker}} at {{close}}. All layers aligned.", alert.freq_once_per_bar)
+if exitLong
+    alert("AlphaTrend - Exit Long: Exit Long: {{ticker}} at {{close}}. Trend reversal detected.", alert.freq_once_per_bar)
+if exitShort
+    alert("AlphaTrend - Exit Short: Exit Short: {{ticker}} at {{close}}. Trend reversal detected.", alert.freq_once_per_bar)
+
+// =============================================================================
+// DEBUG INFO (PLOT IN DATA WINDOW)
+// =============================================================================
+plotchar(longLayersConfirm, "Long Layers Confirm", "", location.top, size=size.tiny, display=display.data_window)
+plotchar(shortLayersConfirm, "Short Layers Confirm", "", location.top, size=size.tiny, display=display.data_window)
+plotchar(barsSinceLongTrigger, "Bars Since Long Trigger", "", location.top, size=size.tiny, display=display.data_window)
+plotchar(barsSinceShortTrigger, "Bars Since Short Trigger", "", location.top, size=size.tiny, display=display.data_window)
