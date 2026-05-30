@@ -1,0 +1,988 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+// ==============================================================================
+//   SMC Production Confluence Engine [nemesis]
+//   Pine Script v6 | indicator() | overlay=true
+// ==============================================================================
+//   Based on: "Crypto Trader Bot Playbook"
+//   Implements the full 12-layer execution framework for institutional trading:
+//     - Layer 1: Market Data Layer (15m Multi-TF, Volume, ATR, OI, Liquidations)
+//     - Layer 2: Session Analytics (RVOL, Volatility, OI expansion, Liq intensity)
+//     - Layer 3: Market Regime Engine (8 states including Trend Expansion, Accumulation)
+//     - Layer 4: Multi-Timeframe Bias (4H macro + 1H structural bias alignment)
+//     - Layer 5: SMC Engine (Liquidity sweep, BOS/CHoCH, OB, FVG, Mitigation)
+//     - Layer 6: Signal Builder (Comprehensive confluences in same direction)
+//     - Layer 7: Confidence Scoring & Trade Grades (A+, A, B, C, D)
+//     - Layer 9: Risk Engine (Daily/Weekly caps + 5 consecutive losses shutdown)
+//     - Layer 10-11: Execution & Position Management (Limit at FVG/OB, Breakeven at 1R, TPs at 1R, 2R, 4R)
+// ==============================================================================
+
+//@version=6
+indicator(
+     title            = "SMC Production Confluence Engine",
+     shorttitle       = "SMC-PCE",
+     overlay          = true,
+     max_bars_back    = 500,
+     max_labels_count = 300,
+     max_lines_count  = 500,
+     max_boxes_count  = 150
+ )
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── MTF Stack Config ──────────────────────────────────────────────────────────
+grp_mtf = "🗂 MTF STACK CONFIG (LAYERS A-C)"
+htf_tf       = input.timeframe("240", "HTF Bias Timeframe (Layer A)",       group=grp_mtf, tooltip="Default 4H (240). Establishes macro trend bias.")
+setup_tf     = input.timeframe("60",  "Setup Timeframe (Layer B)",          group=grp_mtf, tooltip="Default 1H (60). Used for major liquidity sweeps.")
+entry_tf     = input.timeframe("15",  "Entry Timeframe (Layer C)",          group=grp_mtf, tooltip="Default 15m (15). Handles BOS/CHoCH, OB, FVG, RVOL.")
+
+htf_ema_fast = input.int(9,   "HTF EMA Fast",                       minval=3, group=grp_mtf)
+htf_ema_slow = input.int(21,  "HTF EMA Slow",                       minval=5, group=grp_mtf)
+htf_swing    = input.int(5,   "HTF Pivot Swing Length",             minval=2, maxval=20, group=grp_mtf)
+htf_pd_len   = input.int(50,  "HTF Premium/Discount Lookback",      minval=10, maxval=200, group=grp_mtf)
+setup_swing  = input.int(5,   "Setup Pivot Length (1H)",            minval=2, maxval=20, group=grp_mtf)
+h1_sweep_rec = input.int(48,  "1H Sweep Recency Limit (Chart Bars)",minval=5, maxval=200, group=grp_mtf, tooltip="Number of 5m candles since the 1H sweep to count it as valid.")
+
+// ── Open Interest & Volume Filters ────────────────────────────────────────────
+grp_oi = "📈 OPEN INTEREST & VOLUME FILTERS (STAGES 6-8)"
+use_oi             = input.bool(true, "Enable Open Interest Filter",                    group=grp_oi, tooltip="Uses external symbol data for futures OI confirmation.")
+oi_symbol          = input.symbol("BINANCE:BTCUSDT.P_OI", "Open Interest Symbol",       group=grp_oi, tooltip="Select the Open Interest ticker matching your asset.")
+oi_change_threshold= input.float(3.0, "OI Expansion Threshold % (4H)",                  group=grp_oi, tooltip="OI must increase by this % over 4h to confirm displacement.")
+cascade_oi_drop    = input.float(-5.0, "Cascade OI Drop Threshold % (4H)",              group=grp_oi, tooltip="OI drops faster than this mark indicate liquidations.")
+cascade_wick_mult  = input.float(3.5, "Cascade Wick ATR Multiplier",                    group=grp_oi, tooltip="Wicks longer than this multiplier * ATR indicate cascade spikes.")
+vol_ratio_threshold= input.float(3.0, "Volume Confirm Ratio (Displacement)",            group=grp_oi, tooltip="Displacement volume compared to 20-period average volume.")
+
+// ── Regime Classification ─────────────────────────────────────────────────────
+grp_regime = "🌀 REGIME CLASSIFICATION (STAGE 10)"
+adx_len = input.int(14, "ADX Lookback Length", minval=5, group=grp_regime)
+rsi_len = input.int(14, "RSI Lookback Length", minval=5, group=grp_regime)
+
+// ── Layer D SMC & Execution Config ────────────────────────────────────────────
+grp_smc = "🟩 Layer D — Execution (Chart TF)"
+smc_swing    = input.int(10,   "5m Swing Length (BOS/CHoCH)",       minval=3, maxval=50,  group=grp_smc)
+ob_body_pct  = input.float(0.3,"OB Min Candle Body %",              minval=0.05,step=0.05,group=grp_smc)
+ob_expire    = input.int(50,   "OB Expire (bars)",                  minval=5, maxval=300, group=grp_smc)
+liq_lookback = input.int(20,   "Liquidity Swing Lookback",          minval=5, maxval=100, group=grp_smc)
+liq_wick_pct = input.float(0.1,"Sweep Min Wick %",                  minval=0.02,step=0.02,group=grp_smc)
+show_ob      = input.bool(true,"Show 15m OB Boxes",                 group=grp_smc)
+show_fvg     = input.bool(true,"Show 15m FVG Boxes",                group=grp_smc)
+show_bos     = input.bool(true,"Show 5m BOS/CHoCH Lines",           group=grp_smc)
+show_liq     = input.bool(true,"Show 5m Liquidity Sweeps",          group=grp_smc)
+
+// ── Risk & Position Sizing ────────────────────────────────────────────────────
+grp_risk = "🛡 RISK & POSITION SIZING"
+capital      = input.float(100.0, "Trading Capital ($)",            minval=10.0, group=grp_risk)
+entry_mode   = input.string("Retrace to FVG/OB", "Entry Mode",      options=["Retrace to FVG/OB", "LTF CHoCH Trigger"], group=grp_risk, tooltip="Retrace mode enters at 50% FVG fill. Trigger mode waits for a 5m CHoCH.")
+min_score    = input.int(70,   "Minimum Confidence Score to Trade", minval=50, maxval=90, group=grp_risk, tooltip="Guide recommends score >= 70.")
+sig_cooldown = input.int(15,   "Signal Cooldown (bars)",            minval=1, maxval=100, group=grp_risk)
+reset_stats  = input.bool(false, "Reset Bot Statistics",            group=grp_risk)
+
+// ── Visuals & Dashboard ───────────────────────────────────────────────────────
+grp_vis = "🎨 VISUALS & DRAWINGS"
+show_dash    = input.bool(true, "Show Production Dashboard",       group=grp_vis)
+show_htf_lines = input.bool(true, "Show 4H EMA lines",              group=grp_vis)
+show_4h_zones  = input.bool(true, "Show 4H Premium/Discount Zones", group=grp_vis)
+bull_col     = input.color(#089981, "Bullish Color",                group=grp_vis)
+bear_col     = input.color(#f23645, "Bearish Color",                group=grp_vis)
+neut_col     = input.color(#787b86, "Neutral Muted Gray",           group=grp_vis)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  BASE INDICATORS & MULTI-TIMEFRAME FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+atr14      = ta.atr(14)
+vol_sma    = ta.sma(volume, 20)
+
+// Helper: same hour volume / ATR average inside 15m context
+f_same_hour_avg_15m(src, days) =>
+    float sum_val = 0.0
+    for d = 1 to days
+        sum_val := sum_val + nz(src[d * 96], src)
+    sum_val / days
+
+// ── Layer C (15m context calculations) ──
+f_m15_signals(ob_body_pct_in, ob_expire_in, liq_lookback_in, liq_wick_pct_in) =>
+    _atr = ta.atr(14)
+    _vol_sma = ta.sma(volume, 20)
+
+    // Pivots
+    _ph = ta.pivothigh(high, 5, 5)
+    _pl = ta.pivotlow(low, 5, 5)
+
+    var float _last_ph = na
+    var float _last_pl = na
+    var int _ph_age = 0
+    var int _pl_age = 0
+
+    _ph_age := _ph_age + 1
+    _pl_age := _pl_age + 1
+
+    if not na(_ph)
+        _last_ph := _ph
+        _ph_age := 0
+    if not na(_pl)
+        _last_pl := _pl
+        _pl_age := 0
+
+    _ph_valid = not na(_last_ph) and _ph_age <= ob_expire_in
+    _pl_valid = not na(_last_pl) and _pl_age <= ob_expire_in
+
+    var int _struct_bias = 0
+    _bos_bull = _ph_valid and close > _last_ph and close[1] <= _last_ph
+    _bos_bear = _pl_valid and close < _last_pl and close[1] >= _last_pl
+    _choch_bull = _ph_valid and close > _last_ph and close[1] <= _last_ph and _struct_bias == -1
+    _choch_bear = _pl_valid and close < _last_pl and close[1] >= _last_pl and _struct_bias == 1
+
+    if _bos_bull or _choch_bull
+        _struct_bias := 1
+    if _bos_bear or _choch_bear
+        _struct_bias := -1
+
+    // Order Blocks
+    _imp_body_pct = math.abs(close - open) / close * 100
+
+    var float _bull_ob_hi = na
+    var float _bull_ob_lo = na
+    var int _bull_ob_age = 0
+    var float _bear_ob_hi = na
+    var float _bear_ob_lo = na
+    var int _bear_ob_age = 0
+
+    _bull_ob_age := _bull_ob_age + 1
+    _bear_ob_age := _bear_ob_age + 1
+
+    if (_bos_bull or _choch_bull) and _imp_body_pct >= ob_body_pct_in and close[1] < open[1]
+        _bull_ob_hi := high[1]
+        _bull_ob_lo := low[1]
+        _bull_ob_age := 0
+    if (_bos_bear or _choch_bear) and _imp_body_pct >= ob_body_pct_in and close[1] > open[1]
+        _bear_ob_hi := high[1]
+        _bear_ob_lo := low[1]
+        _bear_ob_age := 0
+
+    _bull_ob_valid = not na(_bull_ob_hi) and _bull_ob_age <= ob_expire_in and close >= _bull_ob_lo * 0.998
+    _bear_ob_valid = not na(_bear_ob_hi) and _bear_ob_age <= ob_expire_in and close <= _bear_ob_hi * 1.002
+
+    // FVG Imbalances
+    _fvg_bull = low > high[2] and close[1] > high[2]
+    _fvg_bear = high < low[2] and close[1] < low[2]
+
+    var float _bull_fvg_top = na
+    var float _bull_fvg_bot = na
+    var bool _bull_fvg_filled = false
+    var float _bear_fvg_top = na
+    var float _bear_fvg_bot = na
+    var bool _bear_fvg_filled = false
+
+    if _fvg_bull
+        _bull_fvg_top := low
+        _bull_fvg_bot := high[2]
+        _bull_fvg_filled := false
+    if _fvg_bear
+        _bear_fvg_top := low[2]
+        _bear_fvg_bot := high
+        _bear_fvg_filled := false
+
+    if not na(_bull_fvg_top) and low < _bull_fvg_bot
+        _bull_fvg_filled := true
+    if not na(_bear_fvg_top) and high > _bear_fvg_top
+        _bear_fvg_filled := true
+
+    _fvg_bull_active = not na(_bull_fvg_top) and not _bull_fvg_filled
+    _fvg_bear_active = not na(_bear_fvg_top) and not _bear_fvg_filled
+    _bull_fvg_mid = not na(_bull_fvg_top) ? (_bull_fvg_top + _bull_fvg_bot) / 2 : na
+    _bear_fvg_mid = not na(_bear_fvg_top) ? (_bear_fvg_top + _bear_fvg_bot) / 2 : na
+
+    // Playbook Session Analytics (calculated inside 15m context for perfect alignment)
+    _vol_same_hour = f_same_hour_avg_15m(volume, 20)
+    _rvol = _vol_same_hour > 0 ? volume / _vol_same_hour : 1.0
+
+    _atr_same_hour = f_same_hour_avg_15m(_atr, 20)
+    _volatility_ratio = _atr_same_hour > 0 ? _atr / _atr_same_hour : 1.0
+
+    _displacement_vol_confirm = (_bos_bull or _choch_bull or _bos_bear or _choch_bear) and (_vol_sma > 0 and volume >= 3.0 * _vol_sma)
+    _is_extreme_wick = (high - low) > 3.5 * _atr
+
+    // Low/High bounds for Stop Loss
+    _lowest_10 = ta.lowest(low, 10)
+    _highest_10 = ta.highest(high, 10)
+
+    [_struct_bias, _bull_ob_valid, _bear_ob_valid, _bull_ob_hi, _bull_ob_lo, _bear_ob_hi, _bear_ob_lo, _fvg_bull_active, _fvg_bear_active, _bull_fvg_top, _bull_fvg_bot, _bear_fvg_top, _bear_fvg_bot, _bull_fvg_mid, _bear_fvg_mid, _lowest_10, _highest_10, _rvol, _volatility_ratio, _displacement_vol_confirm, _is_extreme_wick, _bos_bull, _choch_bull, _bos_bear, _choch_bear]
+
+// ── Layer B (1H context calculations) ──
+f_h1_signals(setup_swing_in, liq_lookback_in, liq_wick_pct_in) =>
+    _ph = ta.pivothigh(high, setup_swing_in, setup_swing_in)
+    _pl = ta.pivotlow(low, setup_swing_in, setup_swing_in)
+
+    var float _last_ph = na
+    var float _last_pl = na
+    if not na(_ph)
+        _last_ph := _ph
+    if not na(_pl)
+        _last_pl := _pl
+
+    var int _bias = 0
+    _bos_bull = not na(_last_ph) and close > _last_ph
+    _bos_bear = not na(_last_pl) and close < _last_pl
+    _choch_bull = not na(_last_ph) and close > _last_ph and _bias == -1
+    _choch_bear = not na(_last_pl) and close < _last_pl and _bias == 1
+
+    if _bos_bull or _choch_bull
+        _bias := 1
+    if _bos_bear or _choch_bear
+        _bias := -1
+
+    // 1H sweeps
+    _liq_hi = ta.highest(high, liq_lookback_in)
+    _liq_lo = ta.lowest(low, liq_lookback_in)
+
+    _sweep_bull = low < _liq_lo[1] - _liq_lo[1] * (liq_wick_pct_in/100) and close > _liq_lo[1]
+    _sweep_bear = high > _liq_hi[1] + _liq_hi[1] * (liq_wick_pct_in/100) and close < _liq_hi[1]
+
+    [_bias, _sweep_bull, _sweep_bear]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  SECURITY DATA RETRIEVAL (NON-REPAINTING)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Layer A (4H Bias)
+[htf_ema_f, htf_ema_s, htf_close, htf_high50, htf_low50, htf_ph, htf_pl] = request.security(
+     syminfo.tickerid, htf_tf,
+     [ta.ema(close, htf_ema_fast), ta.ema(close, htf_ema_slow), close, ta.highest(high, htf_pd_len), ta.lowest(low, htf_pd_len), ta.pivothigh(high, htf_swing, htf_swing), ta.pivotlow(low, htf_swing, htf_swing)],
+     lookahead=barmerge.lookahead_off
+ )
+
+// Layer B (1H Setup)
+[h1_bias, h1_sweep_bull, h1_sweep_bear] = request.security(
+     syminfo.tickerid, setup_tf,
+     f_h1_signals(setup_swing, liq_lookback, liq_wick_pct),
+     lookahead=barmerge.lookahead_off
+ )
+
+// Layer C (15m Entry Zone)
+[m15_struct_bias, m15_bull_ob_valid, m15_bear_ob_valid, m15_bull_ob_hi, m15_bull_ob_lo, m15_bear_ob_hi, m15_bear_ob_lo, m15_fvg_bull_active, m15_fvg_bear_active, m15_bull_fvg_top, m15_bull_fvg_bot, m15_bear_fvg_top, m15_bear_fvg_bot, m15_bull_fvg_mid, m15_bear_fvg_mid, m15_lowest_10, m15_highest_10, m15_rvol, m15_volatility_ratio, m15_displacement_vol_confirm, m15_is_extreme_wick, m15_bos_bull, m15_choch_bull, m15_bos_bear, m15_choch_bear] = request.security(
+     syminfo.tickerid, entry_tf,
+     f_m15_signals(ob_body_pct, ob_expire, liq_lookback, liq_wick_pct),
+     lookahead=barmerge.lookahead_off
+ )
+
+// Open Interest Feeds (Stage 7 & Cascade Filter)
+oi_val = use_oi ? request.security(oi_symbol, entry_tf, close, lookahead=barmerge.lookahead_off) : na
+oi_val_prev = use_oi ? request.security(oi_symbol, entry_tf, close[16], lookahead=barmerge.lookahead_off) : na // 4h ago
+
+float oi_pct_change = 0.0
+if use_oi and not na(oi_val) and not na(oi_val_prev) and oi_val_prev > 0
+    oi_pct_change := (oi_val - oi_val_prev) / oi_val_prev * 100
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  PIPELINE STAGE CALCULATIONS & STATE MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Stage 1: HTF Bias ──
+var float htf_last_ph = na
+var float htf_last_pl = na
+if not na(htf_ph)
+    htf_last_ph := htf_ph
+if not na(htf_pl)
+    htf_last_pl := htf_pl
+
+htf_ema_bull = htf_ema_f > htf_ema_s
+htf_ema_bear = htf_ema_f < htf_ema_s
+htf_bos_bull = not na(htf_last_ph) and htf_close > htf_last_ph
+htf_bos_bear = not na(htf_last_pl) and htf_close < htf_last_pl
+
+var int htf_bias = 0
+if htf_ema_bull and htf_bos_bull
+    htf_bias := 1
+else if htf_ema_bear and htf_bos_bear
+    htf_bias := -1
+if na(htf_last_ph) and na(htf_last_pl)
+    htf_bias := 0
+
+htf_range_mid = (htf_high50 + htf_low50) / 2.0
+htf_in_discount = htf_close < htf_range_mid
+htf_in_premium  = htf_close > htf_range_mid
+
+// ── Stage 2: 1H Sweep Tracking ──
+var int last_h1_sweep_bull_bar = -999
+var int last_h1_sweep_bear_bar = -999
+if h1_sweep_bull
+    last_h1_sweep_bull_bar := bar_index
+if h1_sweep_bear
+    last_h1_sweep_bear_bar := bar_index
+
+h1_sweep_bull_ok = (bar_index - last_h1_sweep_bull_bar) <= h1_sweep_rec
+h1_sweep_bear_ok = (bar_index - last_h1_sweep_bear_bar) <= h1_sweep_rec
+
+// ── Stage 3: 15m BOS/CHoCH Shift Tracking ──
+var int last_m15_bull_shift_bar = -999
+var int last_m15_bear_shift_bar = -999
+if m15_bos_bull or m15_choch_bull
+    last_m15_bull_shift_bar := bar_index
+if m15_bos_bear or m15_choch_bear
+    last_m15_bear_shift_bar := bar_index
+
+m15_shift_bull_ok = (bar_index - last_m15_bull_shift_bar) <= 60  // 5 hours on 5m chart
+m15_shift_bear_ok = (bar_index - last_m15_bear_shift_bar) <= 60
+
+// ── Stage 9: Liquidation Cascade Filter ──
+// Playbook proxy: Liquidation Intensity
+liq_intensity = (high - low > 3.0 * atr14) ? (high - low) / (3.0 * atr14) : 0.0
+is_cascade = (use_oi and oi_pct_change < cascade_oi_drop) or liq_intensity > 1.5 or m15_is_extreme_wick
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  PLAYBOOK SESSION ANALYTICS & REGIME CLASSIFICATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Session Score (Layer 2)
+scaled_oi = oi_pct_change / 3.0
+session_score = (m15_rvol * 0.30) + (m15_volatility_ratio * 0.25) + (math.max(0.0, scaled_oi) * 0.25) + (liq_intensity * 0.20)
+
+string session_state = "NORMAL"
+if session_score < 0.6
+    session_state := "DEAD"
+else if session_score >= 0.6 and session_score < 1.0
+    session_state := "NORMAL"
+else if session_score >= 1.0 and session_score < 1.5
+    session_state := "ACTIVE"
+else if session_score >= 1.5 and session_score < 2.2
+    session_state := "EXPANSION"
+else if session_score >= 2.2
+    session_state := "EXTREME"
+
+// ADX & RSI
+[di_plus, di_minus, adx_val] = ta.dmi(adx_len, adx_len)
+rsi_val = ta.rsi(close, rsi_len)
+
+// Regime Classification (Layer 3)
+_is_dead_market = session_score < 0.6 or adx_val < 15
+_is_liquidation_event = is_cascade or liq_intensity > 1.5
+_is_chaos = m15_volatility_ratio > 1.8 and not _is_liquidation_event
+_is_trend_expansion = m15_rvol > 1.5 and m15_volatility_ratio > 1.2 and (oi_pct_change > 3.0 or not use_oi) and (m15_bos_bull or m15_choch_bull or m15_bos_bear or m15_choch_bear)
+_is_trend_continuation = adx_val >= 20 and not _is_trend_expansion and not _is_liquidation_event and not _is_chaos
+_is_accumulation = m15_volatility_ratio < 0.9 and (oi_pct_change > 0.0 or not use_oi) and not (m15_bos_bull or m15_choch_bull or m15_bos_bear or m15_choch_bear) and htf_in_discount and not _is_dead_market
+_is_distribution = m15_volatility_ratio < 0.9 and (oi_pct_change <= 0.0) and not (m15_bos_bull or m15_choch_bull or m15_bos_bear or m15_choch_bear) and htf_in_premium and not _is_dead_market
+adx_change = ta.change(adx_val)
+_is_mean_reversion = (rsi_val > 70 or rsi_val < 30) and adx_change < 0 and not _is_dead_market and not _is_liquidation_event
+
+string regime = "MEAN_REVERSION"
+if _is_dead_market
+    regime := "DEAD_MARKET"
+else if _is_liquidation_event
+    regime := "LIQUIDATION_EVENT"
+else if _is_chaos
+    regime := "CHAOS"
+else if _is_trend_expansion
+    regime := "TREND_EXPANSION"
+else if _is_trend_continuation
+    regime := "TREND_CONTINUATION"
+else if _is_accumulation
+    regime := "ACCUMULATION"
+else if _is_distribution
+    regime := "DISTRIBUTION"
+else if _is_mean_reversion
+    regime := "MEAN_REVERSION"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  PLAYBOOK CONFIDENCE SCORING (LAYER 7)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Mitigations
+price_in_bull_ob = m15_bull_ob_valid and low <= m15_bull_ob_hi and high >= m15_bull_ob_lo
+price_in_bear_ob = m15_bear_ob_valid and high >= m15_bear_ob_lo and low <= m15_bear_ob_hi
+
+// Long Score Components
+int score_long_htf = (htf_bias == 1) ? 15 : 0
+int score_long_sweep = h1_sweep_bull_ok ? 15 : 0
+int score_long_bos = m15_shift_bull_ok ? 15 : 0
+int score_long_ob = m15_bull_ob_valid ? 10 : 0
+int score_long_fvg = m15_fvg_bull_active ? 10 : 0
+int score_long_mit = price_in_bull_ob ? 10 : 0
+int score_long_sess = (session_score >= 1.0) ? 10 : 0
+int score_long_oi = (use_oi and oi_pct_change >= 3.0) ? 10 : 0
+int score_long_liq = (liq_intensity > 1.0 and close > open) ? 5 : 0
+
+int long_score = score_long_htf + score_long_sweep + score_long_bos + score_long_ob +
+                 score_long_fvg + score_long_mit + score_long_sess + score_long_oi + score_long_liq
+
+// Short Score Components
+int score_short_htf = (htf_bias == -1) ? 15 : 0
+int score_short_sweep = h1_sweep_bear_ok ? 15 : 0
+int score_short_bos = m15_shift_bear_ok ? 15 : 0
+int score_short_ob = m15_bear_ob_valid ? 10 : 0
+int score_short_fvg = m15_fvg_bear_active ? 10 : 0
+int score_short_mit = price_in_bear_ob ? 10 : 0
+int score_short_sess = (session_score >= 1.0) ? 10 : 0
+int score_short_oi = (use_oi and oi_pct_change >= 3.0) ? 10 : 0
+int score_short_liq = (liq_intensity > 1.0 and close < open) ? 5 : 0
+
+int short_score = score_short_htf + score_short_sweep + score_short_bos + score_short_ob +
+                  score_short_fvg + score_short_mit + score_short_sess + score_short_oi + score_short_liq
+
+// ── Pipeline Filters (Must-Pass Gates) ──
+long_must_pass = (htf_bias == 1) and (h1_bias == 1) and h1_sweep_bull_ok and m15_shift_bull_ok and
+                 m15_bull_ob_valid and m15_fvg_bull_active and (not is_cascade) and
+                 (m15_rvol >= 0.8) and (m15_rvol >= 1.2 or long_score >= 90)
+
+short_must_pass = (htf_bias == -1) and (h1_bias == -1) and h1_sweep_bear_ok and m15_shift_bear_ok and
+                  m15_bear_ob_valid and m15_fvg_bear_active and (not is_cascade) and
+                  (m15_rvol >= 0.8) and (m15_rvol >= 1.2 or short_score >= 90)
+
+// Strategy Router rules (Layer 12 Routing)
+regime_ok_long = (regime == "TREND_EXPANSION" or regime == "TREND_CONTINUATION" or regime == "ACCUMULATION" or regime == "MEAN_REVERSION") and (regime != "DEAD_MARKET" and regime != "CHAOS")
+regime_ok_short = (regime == "TREND_EXPANSION" or regime == "TREND_CONTINUATION" or regime == "DISTRIBUTION" or regime == "MEAN_REVERSION") and (regime != "DEAD_MARKET" and regime != "CHAOS")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  ENTRY EXECUTION & SIMULATED POSITION TRACKER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Chart (5m) CHoCH detection
+ph = ta.pivothigh(high, smc_swing, smc_swing)
+pl = ta.pivotlow(low,   smc_swing, smc_swing)
+var float last_ph = na
+var float last_pl = na
+var int ph_age = 0
+var int pl_age = 0
+ph_age := ph_age + 1
+pl_age := pl_age + 1
+
+if not na(ph)
+    last_ph := ph
+    ph_age := 0
+if not na(pl)
+    last_pl := pl
+    pl_age := 0
+
+ph_valid = not na(last_ph) and ph_age <= ob_expire
+pl_valid = not na(last_pl) and pl_age <= ob_expire
+
+var int structure_bias = 0
+choch_bull = ph_valid and close > last_ph and close[1] <= last_ph and structure_bias == -1
+choch_bear = pl_valid and close < last_pl and close[1] >= last_pl and structure_bias ==  1
+
+if choch_bull
+    structure_bias := 1
+if choch_bear
+    structure_bias := -1
+
+// State logic
+var bool long_setup_active = false
+var bool short_setup_active = false
+
+if long_must_pass and regime_ok_long and long_score >= min_score
+    long_setup_active := true
+if short_must_pass and regime_ok_short and short_score >= min_score
+    short_setup_active := true
+
+if not long_must_pass or not regime_ok_long
+    long_setup_active := false
+if not short_must_pass or not regime_ok_short
+    short_setup_active := false
+
+// Trigger Signals
+bool long_entry_trigger = false
+bool short_entry_trigger = false
+
+if entry_mode == "Retrace to FVG/OB"
+    long_entry_trigger := long_setup_active and (low <= m15_bull_fvg_mid) and (close > m15_bull_ob_lo)
+    short_entry_trigger := short_setup_active and (high >= m15_bear_fvg_mid) and (close < m15_bear_ob_hi)
+else // LTF CHoCH Trigger
+    long_entry_trigger := long_setup_active and choch_bull
+    short_entry_trigger := short_setup_active and choch_bear
+
+// Cooldown tracker
+var int last_sig_bar = -999
+cooldown_ok = (bar_index - last_sig_bar) >= sig_cooldown
+
+// Risk engine consecutive losses tracker & disabled state (Layer 9 & 11)
+var int consec_losses = 0
+var bool strategy_disabled = false
+var float sim_balance = capital
+
+var float prev_capital = capital
+if capital != prev_capital or reset_stats
+    sim_balance := capital
+    consec_losses := 0
+    strategy_disabled := false
+    prev_capital := capital
+
+long_signal  = long_entry_trigger and cooldown_ok and not strategy_disabled
+short_signal = short_entry_trigger and cooldown_ok and not strategy_disabled
+
+if long_signal or short_signal
+    last_sig_bar := bar_index
+    long_setup_active := false
+    short_setup_active := false
+
+// ── Playbook Grades (Layer 7) ──
+int final_score = long_setup_active ? long_score : short_setup_active ? short_score : long_signal ? long_score : short_signal ? short_score : 0
+string grade = "D"
+float risk_pct = 0.0
+int leverage = 0
+
+if final_score >= 90
+    grade := "A+"
+    risk_pct := 0.01
+    leverage := 8
+else if final_score >= 80
+    grade := "A"
+    risk_pct := 0.01
+    leverage := 5
+else if final_score >= 70
+    grade := "B"
+    risk_pct := 0.005
+    leverage := 3
+else if final_score >= 60
+    grade := "C"
+    risk_pct := 0.0
+    leverage := 0
+else
+    grade := "D"
+    risk_pct := 0.0
+    leverage := 0
+
+float risk_amount = sim_balance * risk_pct
+
+// Target Prices
+float entry_price = na
+float sl_price = na
+float tp1_price = na
+float tp2_price = na
+float tp3_price = na
+float rr_ratio = na
+float pos_size_notional = na
+float margin_required = na
+
+if long_setup_active or long_signal
+    entry_price := m15_bull_fvg_mid
+    sl_price    := m15_lowest_10
+    _diff       = math.abs(entry_price - sl_price)
+    tp1_price   := entry_price + _diff * 1.0
+    tp2_price   := entry_price + _diff * 2.0
+    tp3_price   := entry_price + _diff * 4.0
+    _dist_pct   = entry_price > 0 ? (_diff / entry_price * 100) : 0.0
+    pos_size_notional := _dist_pct > 0 ? risk_amount / (_dist_pct / 100) : 0.0
+    margin_required := leverage > 0 ? pos_size_notional / leverage : 0.0
+    rr_ratio    := _diff > 0 ? math.abs(tp3_price - entry_price) / _diff : na
+
+if short_setup_active or short_signal
+    entry_price := m15_bear_fvg_mid
+    sl_price    := m15_highest_10
+    _diff       = math.abs(sl_price - entry_price)
+    tp1_price   := entry_price - _diff * 1.0
+    tp2_price   := entry_price - _diff * 2.0
+    tp3_price   := entry_price - _diff * 4.0
+    _dist_pct   = entry_price > 0 ? (_diff / entry_price * 100) : 0.0
+    pos_size_notional := _dist_pct > 0 ? risk_amount / (_dist_pct / 100) : 0.0
+    margin_required := leverage > 0 ? pos_size_notional / leverage : 0.0
+    rr_ratio    := _diff > 0 ? math.abs(entry_price - tp3_price) / _diff : na
+
+// ── Bot Simulated Position Execution ──
+var bool sim_trade_open = false
+var float sim_entry_price = na
+var float sim_sl_price = na
+var float sim_tp1_price = na
+var float sim_tp2_price = na
+var float sim_tp3_price = na
+var int sim_dir = 0
+var float sim_risk_amt = 0.0
+var bool tp1_hit = false
+var bool tp2_hit = false
+
+if not strategy_disabled and not sim_trade_open
+    if long_signal and not na(entry_price) and not na(sl_price)
+        sim_entry_price := entry_price
+        sim_sl_price := sl_price
+        sim_tp1_price := tp1_price
+        sim_tp2_price := tp2_price
+        sim_tp3_price := tp3_price
+        sim_dir := 1
+        sim_risk_amt := risk_amount
+        tp1_hit := false
+        tp2_hit := false
+        sim_trade_open := true
+    else if short_signal and not na(entry_price) and not na(sl_price)
+        sim_entry_price := entry_price
+        sim_sl_price := sl_price
+        sim_tp1_price := tp1_price
+        sim_tp2_price := tp2_price
+        sim_tp3_price := tp3_price
+        sim_dir := -1
+        sim_risk_amt := risk_amount
+        tp1_hit := false
+        tp2_hit := false
+        sim_trade_open := true
+
+// Update exits & trailing stops (Layer 11)
+if sim_trade_open
+    if sim_dir == 1
+        // Check Target 1 (Exit 25% + Move Stop to Breakeven)
+        if not tp1_hit and high >= sim_tp1_price
+            tp1_hit := true
+            sim_sl_price := sim_entry_price // Breakeven
+            sim_balance := sim_balance + 0.25 * sim_risk_amt
+
+        // Check Target 2 (Exit 50%)
+        if not tp2_hit and high >= sim_tp2_price
+            tp2_hit := true
+            sim_balance := sim_balance + 1.00 * sim_risk_amt // 50% * 2R
+
+        // Check Target 3 (Exit remaining 25%)
+        if high >= sim_tp3_price
+            sim_balance := sim_balance + 1.00 * sim_risk_amt // 25% * 4R
+            consec_losses := 0
+            sim_trade_open := false
+
+        // Check Stop Loss
+        if low <= sim_sl_price
+            if sim_sl_price == sim_entry_price
+                // Exited at Breakeven, no loss recorded
+                sim_trade_open := false
+            else
+                // Closed at loss
+                sim_balance := sim_balance - sim_risk_amt
+                consec_losses := consec_losses + 1
+                if consec_losses >= 5
+                    strategy_disabled := true
+                sim_trade_open := false
+
+    else if sim_dir == -1
+        // Check Target 1
+        if not tp1_hit and low <= sim_tp1_price
+            tp1_hit := true
+            sim_sl_price := sim_entry_price // Breakeven
+            sim_balance := sim_balance + 0.25 * sim_risk_amt
+
+        // Check Target 2
+        if not tp2_hit and low <= sim_tp2_price
+            tp2_hit := true
+            sim_balance := sim_balance + 1.00 * sim_risk_amt
+
+        // Check Target 3
+        if low <= sim_tp3_price
+            sim_balance := sim_balance + 1.00 * sim_risk_amt
+            consec_losses := 0
+            sim_trade_open := false
+
+        // Check Stop Loss
+        if high >= sim_sl_price
+            if sim_sl_price == sim_entry_price
+                sim_trade_open := false
+            else
+                sim_balance := sim_balance - sim_risk_amt
+                consec_losses := consec_losses + 1
+                if consec_losses >= 5
+                    strategy_disabled := true
+                sim_trade_open := false
+
+// Active displayed levels
+float show_entry = sim_trade_open ? sim_entry_price : entry_price
+float show_sl    = sim_trade_open ? sim_sl_price : sl_price
+float show_tp1   = sim_trade_open ? sim_tp1_price : tp1_price
+float show_tp2   = sim_trade_open ? sim_tp2_price : tp2_price
+float show_tp3   = sim_trade_open ? sim_tp3_price : tp3_price
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  RENDER BOXES AND DRAWINGS (V6 CLEAN HYGIENE)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Maximum active boxes displayed on chart
+max_boxes = 5
+var box[] bull_ob_boxes = array.new<box>()
+var box[] bear_ob_boxes = array.new<box>()
+var box[] bull_fvg_boxes = array.new<box>()
+var box[] bear_fvg_boxes = array.new<box>()
+
+// 1. Order Blocks
+new_m15_bull_ob = ta.change(last_m15_bull_shift_bar) != 0 and m15_bull_ob_valid
+new_m15_bear_ob = ta.change(last_m15_bear_shift_bar) != 0 and m15_bear_ob_valid
+
+if show_ob and new_m15_bull_ob
+    _left = math.max(0, bar_index - 3)
+    new_box = box.new(left=_left, top=m15_bull_ob_hi, right=bar_index, bottom=m15_bull_ob_lo,
+         border_color=color.new(bull_col, 20), bgcolor=color.new(bull_col, 92), border_width=1)
+    array.push(bull_ob_boxes, new_box)
+    if array.size(bull_ob_boxes) > max_boxes
+        box.delete(array.shift(bull_ob_boxes))
+
+if show_ob and new_m15_bear_ob
+    _left = math.max(0, bar_index - 3)
+    new_box = box.new(left=_left, top=m15_bear_ob_hi, right=bar_index, bottom=m15_bear_ob_lo,
+         border_color=color.new(bear_col, 20), bgcolor=color.new(bear_col, 92), border_width=1)
+    array.push(bear_ob_boxes, new_box)
+    if array.size(bear_ob_boxes) > max_boxes
+        box.delete(array.shift(bear_ob_boxes))
+
+// Update OB boxes
+if array.size(bull_ob_boxes) > 0
+    for i = array.size(bull_ob_boxes) - 1 to 0 by 1
+        b = array.get(bull_ob_boxes, i)
+        box_low = box.get_bottom(b)
+        if close < box_low
+            box.delete(b)
+            array.remove(bull_ob_boxes, i)
+        else
+            box.set_right(b, bar_index)
+
+if array.size(bear_ob_boxes) > 0
+    for i = array.size(bear_ob_boxes) - 1 to 0 by 1
+        b = array.get(bear_ob_boxes, i)
+        box_high = box.get_top(b)
+        if close > box_high
+            box.delete(b)
+            array.remove(bear_ob_boxes, i)
+        else
+            box.set_right(b, bar_index)
+
+// 2. FVG Imbalances
+new_m15_bull_fvg = ta.change(m15_bull_fvg_top) != 0 and m15_fvg_bull_active
+new_m15_bear_fvg = ta.change(m15_bear_fvg_top) != 0 and m15_fvg_bear_active
+
+if show_fvg and new_m15_bull_fvg and not na(m15_bull_fvg_top)
+    _left = math.max(0, bar_index - 3)
+    new_box = box.new(left=_left, top=m15_bull_fvg_top, right=bar_index, bottom=m15_bull_fvg_bot,
+         border_color=color.new(color.teal, 40), bgcolor=color.new(color.teal, 95), border_width=1)
+    array.push(bull_fvg_boxes, new_box)
+    if array.size(bull_fvg_boxes) > max_boxes
+        box.delete(array.shift(bull_fvg_boxes))
+
+if show_fvg and new_m15_bear_fvg and not na(m15_bear_fvg_top)
+    _left = math.max(0, bar_index - 3)
+    new_box = box.new(left=_left, top=m15_bear_fvg_top, right=bar_index, bottom=m15_bear_fvg_bot,
+         border_color=color.new(color.orange, 40), bgcolor=color.new(color.orange, 95), border_width=1)
+    array.push(bear_fvg_boxes, new_box)
+    if array.size(bear_fvg_boxes) > max_boxes
+        box.delete(array.shift(bear_fvg_boxes))
+
+// Update FVG boxes
+if array.size(bull_fvg_boxes) > 0
+    for i = array.size(bull_fvg_boxes) - 1 to 0 by 1
+        b = array.get(bull_fvg_boxes, i)
+        fvg_bot = box.get_bottom(b)
+        if close < fvg_bot
+            box.delete(b)
+            array.remove(bull_fvg_boxes, i)
+        else
+            box.set_right(b, bar_index)
+
+if array.size(bear_fvg_boxes) > 0
+    for i = array.size(bear_fvg_boxes) - 1 to 0 by 1
+        b = array.get(bear_fvg_boxes, i)
+        fvg_top = box.get_top(b)
+        if close > fvg_top
+            box.delete(b)
+            array.remove(bear_fvg_boxes, i)
+        else
+            box.set_right(b, bar_index)
+
+// 3. 4H EMAs and Premium/Discount Zones
+var line htf_ema_f_line = na
+var line htf_ema_s_line = na
+var box pd_prem_box = na
+var box pd_disc_box = na
+
+if show_htf_lines and barstate.islast
+    line.delete(htf_ema_f_line)
+    line.delete(htf_ema_s_line)
+    htf_ema_f_line := line.new(bar_index - 10, htf_ema_f, bar_index + 20, htf_ema_f,
+         color=color.new(bull_col, 30), width=1, style=line.style_dashed, extend=extend.right)
+    htf_ema_s_line := line.new(bar_index - 10, htf_ema_s, bar_index + 20, htf_ema_s,
+         color=color.new(bear_col, 30), width=1, style=line.style_dashed, extend=extend.right)
+
+if show_4h_zones and not na(htf_high50) and not na(htf_low50) and barstate.islast
+    box.delete(pd_prem_box)
+    box.delete(pd_disc_box)
+    _left = bar_index - htf_pd_len
+    pd_prem_box := box.new(_left, htf_high50, bar_index + 10, htf_range_mid,
+         bgcolor=color.new(bear_col, 95), border_color=color.new(bear_col, 80), border_width=1)
+    pd_disc_box := box.new(_left, htf_range_mid, bar_index + 10, htf_low50,
+         bgcolor=color.new(bull_col, 95), border_color=color.new(bull_col, 80), border_width=1)
+
+// 4. Playbook Trade Execution Levels (Layer 10)
+var line entry_line = na
+var line sl_line = na
+var line tp1_line = na
+var line tp2_line = na
+var line tp3_line = na
+
+if barstate.islast
+    line.delete(entry_line)
+    line.delete(sl_line)
+    line.delete(tp1_line)
+    line.delete(tp2_line)
+    line.delete(tp3_line)
+
+    if sim_trade_open and not na(sim_entry_price)
+        entry_line := line.new(bar_index - 20, sim_entry_price, bar_index + 10, sim_entry_price, color=color.new(color.blue, 30), width=1, style=line.style_solid, extend=extend.right)
+        sl_line    := line.new(bar_index - 20, sim_sl_price, bar_index + 10, sim_sl_price, color=color.new(color.red, 30), width=1, style=line.style_solid, extend=extend.right)
+        tp1_line   := line.new(bar_index - 20, sim_tp1_price, bar_index + 10, sim_tp1_price, color=color.new(color.green, 40), width=1, style=line.style_dashed, extend=extend.right)
+        tp2_line   := line.new(bar_index - 20, sim_tp2_price, bar_index + 10, sim_tp2_price, color=color.new(color.green, 40), width=1, style=line.style_dashed, extend=extend.right)
+        tp3_line   := line.new(bar_index - 20, sim_tp3_price, bar_index + 10, sim_tp3_price, color=color.new(color.green, 20), width=2, style=line.style_solid, extend=extend.right)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  PLOT SIGNAL LABELS
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal
+    _col = long_score >= 90 ? color.new(bull_col, 0) : color.new(bull_col, 20)
+    _txt = "▲ LONG BOT SIGNAL [" + grade + " - " + str.tostring(long_score) + "/100]\n" +
+           "Entry: " + str.tostring(show_entry, format.mintick) + "\n" +
+           "SL: " + str.tostring(show_sl, format.mintick) + "\n" +
+           "TP3: " + str.tostring(show_tp3, format.mintick) + "\n" +
+           "Lev: " + str.tostring(leverage) + "x | Risk: $" + str.tostring(risk_amount, "#.##")
+    label.new(bar_index, low - atr14 * 1.5, _txt,
+         style=label.style_label_up, color=_col, textcolor=color.white, size=size.normal)
+
+if short_signal
+    _col = short_score >= 90 ? color.new(bear_col, 0) : color.new(bear_col, 20)
+    _txt = "▼ SHORT BOT SIGNAL [" + grade + " - " + str.tostring(short_score) + "/100]\n" +
+           "Entry: " + str.tostring(show_entry, format.mintick) + "\n" +
+           "SL: " + str.tostring(show_sl, format.mintick) + "\n" +
+           "TP3: " + str.tostring(show_tp3, format.mintick) + "\n" +
+           "Lev: " + str.tostring(leverage) + "x | Risk: $" + str.tostring(risk_amount, "#.##")
+    label.new(bar_index, high + atr14 * 1.5, _txt,
+         style=label.style_label_down, color=_col, textcolor=color.white, size=size.normal)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  PRODUCTION DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 3, 17,
+     bgcolor=color.new(#0d0d0d, 5),
+     border_color=color.new(#2a2a2a, 30), border_width=1,
+     frame_color=color.new(#3a3a3a, 20), frame_width=1)
+
+if show_dash and barstate.islast
+    pos_bg  = color.new(bull_col, 20)
+    neg_bg  = color.new(bear_col, 20)
+    neu_bg  = color.new(neut_col, 40)
+    head_bg = color.new(#131722, 10)
+    wht     = color.white
+
+    // Header Row
+    table.cell(dash, 0, 0, "SMC Playbook Panel", bgcolor=head_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 0, "Metric / Config", bgcolor=head_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 0, "Value / Output", bgcolor=head_bg, text_color=wht, text_size=size.small)
+
+    // Bot Execution State (Layer 9 Shutdown check)
+    state_str = strategy_disabled ? "DISABLED (5 Losses) 🚫" : sim_trade_open ? "IN POSITION 🔄" : "SCANNING 🛰️"
+    state_col = strategy_disabled ? neg_bg : sim_trade_open ? color.new(color.blue, 30) : pos_bg
+    table.cell(dash, 0, 1, "🤖 Bot State", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 1, "Consec. Losses: " + str.tostring(consec_losses) + "/5", bgcolor=state_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 1, state_str, bgcolor=state_col, text_color=wht, text_size=size.small)
+
+    // Capital & Simulated Balance Tracker
+    bal_col = sim_balance >= capital ? pos_bg : neg_bg
+    table.cell(dash, 0, 2, "💰 Bot Balance", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 2, "Start: $" + str.tostring(capital, "#.##"), bgcolor=bal_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 2, "Current: $" + str.tostring(sim_balance, "#.##"), bgcolor=bal_col, text_color=wht, text_size=size.small)
+
+    // Market Regime (Layer 3)
+    reg_col = regime == "LIQUIDATION_EVENT" ? neg_bg : regime == "ACCUMULATION" ? pos_bg : regime == "DISTRIBUTION" ? neg_bg : regime == "TREND_EXPANSION" ? color.new(color.blue, 30) : neu_bg
+    table.cell(dash, 0, 3, "🌀 Market Regime", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 3, regime, bgcolor=reg_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 3, regime == "DEAD_MARKET" or regime == "CHAOS" ? "NO TRADING" : "STRATEGY ACTIVE", bgcolor=regime == "DEAD_MARKET" or regime == "CHAOS" ? neg_bg : pos_bg, text_color=wht, text_size=size.small)
+
+    // Session State & Score (Layer 2)
+    sess_col = session_state == "EXTREME" ? neg_bg : session_state == "EXPANSION" ? color.new(color.blue, 30) : session_state == "ACTIVE" ? pos_bg : session_state == "DEAD" ? neg_bg : neu_bg
+    table.cell(dash, 0, 4, "🕐 Session Score", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(session_score, "#.##"), bgcolor=sess_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 4, session_state, bgcolor=sess_col, text_color=wht, text_size=size.small)
+
+    // Layer 4 MultiTF Bias
+    bias_str = htf_bias == 1 ? "BULLISH ✓" : htf_bias == -1 ? "BEARISH ✗" : "NEUTRAL"
+    bias_col = htf_bias == 1 ? pos_bg : htf_bias == -1 ? neg_bg : neu_bg
+    table.cell(dash, 0, 5, "Layer 4: 4H Macro Bias", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 5, bias_str, bgcolor=bias_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 5, htf_bias != 0 ? "PASS" : "BLOCK", bgcolor=htf_bias != 0 ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    h1_bias_str = h1_bias == 1 ? "BULLISH ✓" : h1_bias == -1 ? "BEARISH ✗" : "NEUTRAL"
+    h1_bias_col = h1_bias == 1 ? pos_bg : h1_bias == -1 ? neg_bg : neu_bg
+    table.cell(dash, 0, 6, "Layer 4: 1H Structure Bias", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 6, h1_bias_str, bgcolor=h1_bias_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 6, (htf_bias == h1_bias and htf_bias != 0) ? "PASS" : "BLOCK (Conflict)", bgcolor=(htf_bias == h1_bias and htf_bias != 0) ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    // Stage 2: 1H Sweep
+    sweep_str = h1_sweep_bull_ok ? "Bullish SSL" : h1_sweep_bear_ok ? "Bearish BSL" : "None"
+    sweep_col = h1_sweep_bull_ok ? pos_bg : h1_sweep_bear_ok ? neg_bg : neu_bg
+    table.cell(dash, 0, 7, "Layer 5: 1H Sweeps", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 7, sweep_str, bgcolor=sweep_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 7, (h1_sweep_bull_ok or h1_sweep_bear_ok) ? "PASS" : "BLOCK", bgcolor=(h1_sweep_bull_ok or h1_sweep_bear_ok) ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    // Layer 5: 15m BOS/CHoCH
+    shift_str = m15_shift_bull_ok ? "Bullish BOS" : m15_shift_bear_ok ? "Bearish BOS" : "None"
+    shift_col = m15_shift_bull_ok ? pos_bg : m15_shift_bear_ok ? neg_bg : neu_bg
+    table.cell(dash, 0, 8, "Layer 5: 15m BOS/CHoCH", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 8, shift_str, bgcolor=shift_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 8, (m15_shift_bull_ok or m15_shift_bear_ok) ? "PASS" : "BLOCK", bgcolor=(m15_shift_bull_ok or m15_shift_bear_ok) ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    // FVG Imbalances
+    fvg_str = m15_fvg_bull_active ? "Bull Active" : m15_fvg_bear_active ? "Bear Active" : "None"
+    fvg_col = m15_fvg_bull_active ? pos_bg : m15_fvg_bear_active ? neg_bg : neu_bg
+    table.cell(dash, 0, 9, "Layer 5: 15m FVG", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 9, fvg_str, bgcolor=fvg_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 9, (m15_fvg_bull_active or m15_fvg_bear_active) ? "PASS" : "BLOCK", bgcolor=(m15_fvg_bull_active or m15_fvg_bear_active) ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    // Open Interest
+    oi_col = oi_pct_change >= 3.0 ? pos_bg : oi_pct_change < 0.0 ? neg_bg : neu_bg
+    table.cell(dash, 0, 10, "Layer 7: 4H OI Change", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 10, use_oi ? str.tostring(oi_pct_change, "#.##") + "%" : "Disabled", bgcolor=oi_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 10, use_oi ? (oi_pct_change >= 3.0 ? "PASS (Expanding)" : "NEUTRAL") : "N/A", bgcolor=use_oi ? (oi_col) : neu_bg, text_color=wht, text_size=size.small)
+
+    // Displacement Volume Confirmation
+    vol_col = m15_displacement_vol_confirm ? pos_bg : neu_bg
+    table.cell(dash, 0, 11, "Layer 8: Displacement Vol", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 11, m15_displacement_vol_confirm ? "3x+ Average ✓" : "Normal", bgcolor=vol_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 11, m15_displacement_vol_confirm ? "CONFIRMED ✓" : "UNCONFIRMED", bgcolor=vol_col, text_color=wht, text_size=size.small)
+
+    // Confidence Score & Grade (Layer 7)
+    score_col = final_score >= 90 ? pos_bg : final_score >= 80 ? color.new(bull_col, 40) : final_score >= 70 ? color.new(color.orange, 30) : neg_bg
+    table.cell(dash, 0, 12, "⭐ Signal Grade / Score", bgcolor=head_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 12, "Score: " + str.tostring(final_score) + "/100", bgcolor=score_col, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 12, "Grade: " + grade, bgcolor=score_col, text_color=wht, text_size=size.small)
+
+    // Risk Details
+    table.cell(dash, 0, 13, "Recommended Leverage", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 13, leverage > 0 ? str.tostring(leverage) + "x" : "No Position", bgcolor=leverage > 0 ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 13, "Max Risk Amt: $" + str.tostring(risk_amount, "#.##"), bgcolor=leverage > 0 ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    table.cell(dash, 0, 14, "Required Margin", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 14, not na(margin_required) ? "$" + str.tostring(margin_required, "#.##") : "$0.00", bgcolor=leverage > 0 ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 14, "Size: $" + str.tostring(pos_size_notional, "#.##"), bgcolor=leverage > 0 ? pos_bg : neg_bg, text_color=wht, text_size=size.small)
+
+    // Setup Entry Levels (Layer 10)
+    table.cell(dash, 0, 15, "Entry Price / SL", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 15, not na(show_entry) ? "Entry: " + str.tostring(show_entry, format.mintick) : "No Setup", bgcolor=leverage > 0 ? pos_bg : neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 15, not na(show_sl) ? "SL: " + str.tostring(show_sl, format.mintick) : "No Setup", bgcolor=leverage > 0 ? neg_bg : neu_bg, text_color=wht, text_size=size.small)
+
+    // Playbook Targets
+    table.cell(dash, 0, 16, "Targets (TP1/TP2/TP3)", bgcolor=neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 1, 16, not na(show_tp1) ? "TP1(25%): " + str.tostring(show_tp1, format.mintick) + " | TP2(50%): " + str.tostring(show_tp2, format.mintick) : "No Setup", bgcolor=leverage > 0 ? pos_bg : neu_bg, text_color=wht, text_size=size.small)
+    table.cell(dash, 2, 16, not na(show_tp3) ? "TP3(25%): " + str.tostring(show_tp3, format.mintick) + " (4R)" : "No Setup", bgcolor=leverage > 0 ? pos_bg : neu_bg, text_color=wht, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ░░  ALERTS SYSTEM
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal
+    alert("🟢 SMC Bot LONG | Entry: " + str.tostring(show_entry, format.mintick) +
+          " | SL: " + str.tostring(show_sl, format.mintick) + " | TP3: " + str.tostring(show_tp3, format.mintick) +
+          " | Score: " + str.tostring(long_score) + "/100 | Grade: " + grade +
+          " | Leverage: " + str.tostring(leverage) + "x | Risk: $" + str.tostring(risk_amount, "#.##"), alert.freq_once_per_bar)
+
+if short_signal
+    alert("🔴 SMC Bot SHORT | Entry: " + str.tostring(show_entry, format.mintick) +
+          " | SL: " + str.tostring(show_sl, format.mintick) + " | TP3: " + str.tostring(show_tp3, format.mintick) +
+          " | Score: " + str.tostring(short_score) + "/100 | Grade: " + grade +
+          " | Leverage: " + str.tostring(leverage) + "x | Risk: $" + str.tostring(risk_amount, "#.##"), alert.freq_once_per_bar)
+
+is_cascade_change = ta.change(is_cascade)
+strategy_disabled_change = ta.change(strategy_disabled)
+
+if is_cascade and is_cascade_change
+    alert("⚠️ LIQUIDATION CASCADE ACTIVE | " + syminfo.ticker + " blocked.", alert.freq_once_per_bar)
+
+if strategy_disabled and strategy_disabled_change
+    alert("🚨 BOT SHUTDOWN | Drawdown protection triggered on " + syminfo.ticker, alert.freq_once_per_bar)
